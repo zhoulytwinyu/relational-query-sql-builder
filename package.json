@@ -1,0 +1,13 @@
+{
+  "name": "relational-query-sql-builder",
+  "version": "0.0.1",
+  "description": "",
+  "main": "./index.js",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/zhoulytwinyu/relational-query-sql-builder.git"
+  },
+  "author": "Lingyu Zhou <zhoulytwin@gmail.com>",
+  "license": "GPL-3.0",
+  "homepage": "https://github.com/zhoulytwinyu/relational-query-sql-builder#readme"
+}
