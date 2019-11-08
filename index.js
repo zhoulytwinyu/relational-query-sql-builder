@@ -135,27 +135,19 @@ class SqlBuilder {
     }
     return true;
   }
-
-  _isValidQuery(query) {
+    
+  _isValidQuerySelect(querySelect) {
     let {schema} = this;
-    // query not an object
-    if (query === null || typeof query !== "object") {
-      return false;
-    }
-    // query does not contain "SELECT" and "FILTER"
-    if ( !("SELECT" in query) || !("FILTER" in query) ) {
-      return false;
-    }
-    // Entities in query.SELECT is defined in schema
-    for (let e of Object.keys(query["SELECT"])) {
+    // Entities are defined in schema
+    for (let e of Object.keys(querySelect)) {
       if ( !(e in schema) ){
         return false;
       }
     }
-    // Entities attributes in query.SELECT is defined in schema
-    for (let e of Object.keys(query["SELECT"])) {
+    // Entities attributes are defined in schema
+    for (let e of Object.keys(querySelect)) {
       let definedAttrs = schema[e]["ATTRIBUTE"];
-      let queryAttrs = Object.keys(query["SELECT"][e]);
+      let queryAttrs = Object.keys(querySelect[e]);
       for (let a of queryAttrs) {
         if ( !(a in definedAttrs) ){
           return false;
@@ -183,17 +175,108 @@ class SqlBuilder {
       }
     }
     // Entities attributes filter operator is valid
-    for (let filterSet of query["FILTER"]) {
-      for ( let [entitiy,entityFilter] of Object.entries(filterSet)) {
-        for ( let [col,colFilter] of Object.entries(entityFilter) ) {
-          if ( !(colFilter[0] in SqlBuilder.VALID_FILTER_OPERATOR) ) {
-            return false;
-          }
+    this._isValidFilter(query["FILTER"]);
+  }
+
+  _isValidFilter(filterNode) {
+    let {schema} = this;
+    let {op,args} = filterNode;
+    switch (op) {
+      // Monadic
+      case "NOT":
+        if (args.length !== 1) {
+          return false;
         }
+        if (arg[0].op === "NOT") {
+          return false;
+        }
+     
+      // Logical+Polyadic
+      case "AND":
+      case "OR":
+        if (args.length <=1) {
+          return false;
+        }
+     
+      // Comparison+Dyadic
+      case "=":
+      case "<":
+      case ">":
+      case "<=":
+      case ">=":
+      case "!<":
+      case "!=":
+      case "<>":
+      case "!>":
+      case "!<=":
+      case "!>=":
+      case "LIKE":
+      case "NOT LIKE":
+      case "IS":
+      case "IS NOT":
+        if (args.length !== 2) {
+          return false;
+        }
+        if ( !(args.every(_isValidFilterLeaf)) ) {
+          return false;
+        }
+       
+      // Comparison+Triadic
+      case "BETWEEN":
+      CASE "NOT BETWEEN":
+        if (args.length !== 3) {
+          return false;
+        }
+        if ( !(args.every(_isValidFilterLeaf)) ) {
+          return false;
+        }
+     
+      // Comparison+Polyadic
+      case "IN":
+      case "NOT IN":
+        if (args.length < 2) {
+          return false;
+        }
+        if ( !(args.every(_isValidFilterLeaf)) ) {
+          return false;
+        }
+     
+      default:
+        return false;
+    }
+    for (let arg of args) {
+      if ( !_isValidFilter(arg) ) {
+        return false;
       }
     }
     return true;
   }
+
+  _isValidFilterLeaf(leaf) {
+    let {schema} = this;
+    if (leaf === null
+        || typeof leaf === "string"
+        || typeof leaf === "number"
+        || _isValidEntityAttribute(leaf)
+        ) {
+      return true;
+    }
+    return false;
+  }
+  
+  _isValidEntityAttribute(leaf) {
+    let {schema} = this;
+    let filterableAttributes = this._getFilterableAttribute(schema);
+    if (leaf !== null
+        && typeof leaf === "object"
+        && typeof leaf.attribute === "string"
+        && leaf.attribute) {
+      return true;
+    }
+    return false;
+  }
+  
+
 
   _generateSQL(entity,query) {
     let {schema} = this;
@@ -348,53 +431,103 @@ class SqlBuilder {
     return joinStatement;
   }
 
-  _generateOperatorStatement(attrFilter,count) {
-    let op = attrFilter[0];
-    let binds = attrFilter.slice(1);
-    let listBinds = null;
+  _generateOperatorStatement(filterTree,count=0) {
+    let {op,args} = filterTree;
     let statement = null;
-    switch (op) {
-      case "<":
-      case "=":
-      case ">":
-      case "<=":
-      case ">=":
-      case "!<":
-      case "!=":
-      case "<>":
-      case "!>":
-      case "!<=":
-      case "!>=":
-      case "LIKE":
-      case "NOT LIKE":
-      case "IS":
-      case "IS NOT":
-        if ( binds.length !== 1 ) {
-          throw new SyntaxError(`'${op}' operator accepts 1 argument`);
-        }
-        statement = `${op} :${count}`;
-        break;
-      case "BETWEEN":
-      case "NOT BETWEEN":
-        if ( binds.length !== 2 ) {
-          throw new SyntaxError(`'${op}' operator accepts 2 argument2`);
-        }
-        statement = `${op} :${count} AND :${count+1}`;
-        break;
-      case "IN":
-      case "NOT IN":
-        if ( !(binds.length >= 1) ) {
-          throw new SyntaxError(`'${op}' operator accepts 1 or more arguments`);
-        }
-        listBinds = binds
-          .map( (_x,i)=>`:${count+i}` )
-          .join(',');
-        statement = `${op} (${listBinds})`;
-        break;
-      default:
-        throw new SyntaxError(`'${op}' operator not accepted`);
+    let binds = null;
+   
+    if (op === "NOT"){
+      let node = args[0];
+      let [statement,binds] = _generateOperatorStatement(node,count+binds.length);
+      statement = `NOT ${statement}`;
+      return [statement,binds];
     }
-    return [statement,binds];
+   
+    else if (
+        op === "AND"
+        || op === "OR"
+        ) {
+      statement = [];
+      binds = [];
+      for (let node of args) {
+        let [tmpStatement,tmpBinds] = _generateOperatorStatement(node,count+binds.length);
+        statement.push( `(${tmpStatement})` );
+        binds.push(...tmpBinds);
+      }
+      statement = statement.join(` ${op} `);
+      return [statement,binds];
+    }
+     
+    else if (
+        op === "="
+        || op === "<"
+        || op === ">"
+        || op === "<="
+        || op === ">="
+        || op === "!<"
+        || op === "!>"
+        || op === "!="
+        || op === "LIKE"
+        || op === "NOT LIKE"
+        || op === "IS"
+        || op === "IS NOT"
+        ) {
+      statement = [];
+      binds = [];
+      for (let arg of args) {
+        if ( _isValidEntityAttribute(arg) ) {
+          statement.push(arg.attribute);
+        }
+        else {
+          statement.push( `:${count+binds.length}` );
+          binds.push(arg);
+        }
+      }
+      statement = statement.join(` ${op} `);
+      return [statement,binds];
+    }
+   
+    else if (
+        op === "BETWEEN"
+        || op === "NOT BETWEEN"
+        ) {
+      statement = [];
+      binds = [];
+      for (let arg of args) {
+        if ( _isValidEntityAttribute(arg) ) {
+          statement.push(arg.attribute);
+        }
+        else {
+          statement.push( `:${count+binds.length}` );
+          binds.push(arg);
+        }
+      }
+      statement = `${statement[0]} ${op} ${statement[1]} AND ${statement[2]}`;
+      return [statement,binds];
+    }
+   
+    else if (
+        op === "IN"
+        || op === "NOT IN"
+        ) {
+      statement = [];
+      binds = [];
+      for (let arg of args) {
+        if ( _isValidEntityAttribute(arg) ) {
+          statement.push(arg.attribute);
+        }
+        else {
+          statement.push( `:${count+binds.length}` );
+          binds.push(arg);
+        }
+      }
+      statement = `${statement[0]} %{op} (${statement.slice(1).join(',')})`;
+      return [statement,binds];
+    }
+   
+    else {
+      throw new InternalError("Filter parsing error");
+    }
   }
 }
 
