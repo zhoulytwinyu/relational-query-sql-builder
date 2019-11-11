@@ -93,7 +93,7 @@ class SqlBuilder {
       g[n] = {};
     }
     for (let [entity,config] of Object.entries(schema)) {
-      let ref = config["REFERENCE"] || {};
+      let ref = config["references"] || {};
       for (let refEntity of Object.keys(ref)) {
         if (!(refEntity in g)) {
           throw new SyntaxError("Schema entity tries to reference an non-existent entity");
@@ -122,7 +122,6 @@ class SqlBuilder {
         return false;
       }
       visitedGraph[nn] = {};
-
       for (let nnn of Object.keys(graph[nn])) {
         // Skip edges that have been traversed 
         if (nnn in visitedGraph &&
@@ -157,9 +156,7 @@ class SqlBuilder {
       return false;
     }
     query.filter = query.filter || null;
-    if ( "filter" in query
-        && !this._isValidQueryFilter(query.filter)
-        ) {
+    if ( !this._isValidQueryFilter(query.filter) ) {
       return false;
     }
     return true;
@@ -175,7 +172,7 @@ class SqlBuilder {
     }
     // Entities attributes are defined in schema
     for (let e of Object.keys(querySelect)) {
-      let definedAttrs = schema[e]["ATTRIBUTE"];
+      let definedAttrs = schema[e].attributes;
       let queryAttrs = Object.keys(querySelect[e]);
       for (let a of queryAttrs) {
         if ( !(a in definedAttrs) ){
@@ -183,10 +180,11 @@ class SqlBuilder {
         }
       }
     }
+    return true;
   }
 
   _isValidQueryFilter(queryFilter) {
-    if (queryilter === null) {
+    if (queryFilter === null) {
       return true;
     }
     let {schema} = this;
@@ -199,9 +197,11 @@ class SqlBuilder {
       if (!valid) {
         return false;
       }
-      if (let fn in fNode.filters) {
-        dfsStack.push(fn);
-        parentOpTypeStack.push(fNode.op);
+      if ("filters" in fNode) {
+        for (let fn of fNode.filters) {
+          dfsStack.push(fn);
+          parentOpTypeStack.push(fNode.op);
+        }
       }
     }
     return true;
@@ -258,7 +258,7 @@ class SqlBuilder {
       case "AND":
       case "OR":
         if (!("filters" in filterNode) 
-            || filterNode.filters..length <=1
+            || filterNode.filters.length <=1
             ) {
           return false;
         }
@@ -335,7 +335,7 @@ class SqlBuilder {
     if (filterVariable === null
         || typeof filterVariable === "string"
         || typeof filterVariable === "number"
-        || _isValidEntityAttribute(filterVariable)
+        || this._isValidEntityAttribute(filterVariable)
         ) {
       return true;
     }
@@ -349,7 +349,7 @@ class SqlBuilder {
         && typeof filterVariable.entity === "string"
         && typeof filterVariable.attribute === "string"
         && (filterVariable.entity in this.schema)
-        && (filterVariable.attribute in this.schema[filterVariable.entity])
+        && (filterVariable.attribute in this.schema[filterVariable.entity].attributes)
         ) {
       return true;
     }
@@ -360,7 +360,7 @@ class SqlBuilder {
     if (queryFilter === null) {
       return [];
     }
-    let dfsStask = [queryFilter];
+    let dfsStack = [queryFilter];
     let ret = [];
     while (dfsStack.length !== 0){
       let fNode = dfsStack.pop();
@@ -369,19 +369,18 @@ class SqlBuilder {
       }
       if ("variables" in fNode){
         for (let v of fNode.variables){
-          if (typeof fNode === "object"
-              && fNode !== null
+          if (typeof v === "object"
+              && v !== null
               ){
-            ret.push(fNode.entity);
+            ret.push(v.entity);
           }
         }
       }
     }
-    return ret;
+    return [...new Set(ret)];
   }
   
   _generateSQL(entity,query) {
-    let {schema} = this;
     let cteStatement = this._generateCTEStatement(entity,query);
     let selectStatement = this._generateSelectStatement(entity,query);
     let fromStatement = this._generateFromStatement(entity,query);
@@ -394,37 +393,31 @@ class SqlBuilder {
 
   _generateCTEStatement(entity,query) {
     let {schema} = this;
-    let querySelect = query["SELECT"];
-    let queryFilter = query["FILTER"];
+    let querySelect = query.select;
+    let queryFilter = query.filter;
     let statements = [];
     let includeCTE = {};
     includeCTE[entity] = null;
     let entities = this._getFilterEntities(queryFilter);
-    for (let filterSet of queryFilter) {
-      for (let refE of Object.keys(filterSet)) {
-        if (refE in includeCTE) {
-          continue;
-        }
-        else {
-          for (let interE of this._resolveJoinOrder(entity,refE)) {
-            includeCTE[interE] = null;
-          }
-        }
+    let joinOrder = this._resolveJoinOrder(entity,entities);
+    for (let joinPath of joinOrder) {
+      for (let e of joinPath){
+        includeCTE[e] = null;
       }
     }
     for ( let e of Object.keys(includeCTE) ) {
-      statements.push(schema[e]["CTE"]);
+      statements.push(schema[e].cte);
     }
     return "WITH "+statements.join(',');
   }
 
   _generateSelectStatement(entity,query) {
     let {schema} = this;
-    let querySelect = query["SELECT"];
+    let querySelect = query.select;
     let queryAttrs = {...querySelect[entity]};
     queryAttrs["__ID__"] = null;
-    if ("REFERENCE" in schema[entity]) {
-      for ( let [refEntity,id] of Object.entries(schema[entity]["REFERENCE"]) ) {
+    if ("references" in schema[entity]) {
+      for ( let [refEntity,id] of Object.entries(schema[entity].references) ) {
         if (refEntity in querySelect) {
           queryAttrs[`__REF__${refEntity}`];
         }
@@ -450,8 +443,11 @@ class SqlBuilder {
     let queryFilter = query["filter"];
     let entities = this._getFilterEntities(queryFilter);
     let joinStatement = this._generateJoinStatement(entity,entities);
-    let filterStatement = this._generateFilterStatement(queryFilter);
-    return `WHERE "${entity}"."__ID__" IN (SELECT "${entity}"."__ID__" FROM ${joinStatement} WHERE ${filterStatement})`;
+    let [filterStatement,binds] = this._generateFilterStatement(queryFilter);
+    return [
+      `WHERE "${entity}"."__ID__" IN (SELECT "${entity}"."__ID__" FROM ${joinStatement} WHERE ${filterStatement})`,
+      binds
+    ];
   }
 
   _generateJoinStatement(entity1,entities) {
@@ -524,19 +520,19 @@ class SqlBuilder {
   _generateAdjacentJoinOnStatement(entity1,entity2) {
     // Internal method, assuming entity1, entity2 both in schema and adjacent
     let {schema} = this;
-    let joinStatement = null;
+    let joinOnStatement = null;
     // Either entity1 references entity2
-    if ("REFERENCE" in schema[entity1] &&
-        entity2 in schema[entity1]["REFERENCE"]) {
+    if ("references" in schema[entity1] &&
+        entity2 in schema[entity1].references) {
       joinOnStatement = `"${entity1}"."__REF__${entity2}"="${entity2}"."__ID__"`;
     }
     // Or entity2 references entity1
-    else if ("REFERENCE" in schema[entity2] &&
-        entity1 in schema[entity2]["REFERENCE"]) {
+    else if ("references" in schema[entity2] &&
+        entity1 in schema[entity2].references) {
       joinOnStatement = `"${entity1}"."__ID__"="${entity2}"."__REF__${entity1}"`;
     }
     else {
-      throw new InternalError("Not adjacent entities");
+      throw new Error("Not adjacent entities");
     }
     return joinOnStatement;
   }
@@ -545,7 +541,7 @@ class SqlBuilder {
     let {op,filters,variables} = filterNode;
     if (op === "NOT"){
       let fn = filters[0];
-      let [statement,binds] = this._generateFilterStatement(fn,bindsCount+binds.length);
+      let [statement,binds] = this._generateFilterStatement(fn,bindsCount);
       statement = `NOT ${statement}`;
       return [statement,binds];
     }
@@ -556,7 +552,7 @@ class SqlBuilder {
       let statement = [];
       let binds = [];
       for (let fn of filters) {
-        let [tmpStatement,tmpBinds] = _generateOperatorStatement(fn,count+binds.length);
+        let [tmpStatement,tmpBinds] = this._generateFilterStatement(fn,bindsCount+binds.length);
         statement.push( `(${tmpStatement})` );
         binds.push(...tmpBinds);
       }
@@ -583,7 +579,7 @@ class SqlBuilder {
           statement.push(`${fv.entity}.${fv.attribute}`);
         }
         else {
-          statement.push( `:${count+binds.length}` );
+          statement.push( `:${bindsCount+binds.length}` );
           binds.push(fv);
         }
       }
@@ -602,7 +598,7 @@ class SqlBuilder {
           statement.push(`${fv.entity}.${fv.attribute}`);
         }
         else {
-          statement.push( `:${count+binds.length}` );
+          statement.push( `:${bindsCount+binds.length}` );
           binds.push(fv);
         }
       }
@@ -621,7 +617,7 @@ class SqlBuilder {
           statement.push(`${fv.entity}.${fv.attribute}`);
         }
         else {
-          statement.push( `:${count+binds.length}` );
+          statement.push( `:${bindsCount+binds.length}` );
           binds.push(fv);
         }
       }
@@ -630,7 +626,7 @@ class SqlBuilder {
     }
    
     else {
-      throw new InternalError("Filter parsing error");
+      throw new Error("Filter parsing error");
     }
   }
 }
