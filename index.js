@@ -1,24 +1,30 @@
 function memoize_one(func) {
   let memo = {
-    args:[],
+    args:undefined,
     result:undefined
   };
   return function(...args) {
+    if (memo.args===undefined) {
+      memo.result = func(args);
+      memo.args = args;
+      return memo.result;
+    }
+    let hit = true;
     if (memo.args.length===args.length) {
-      let isSame = true;
       for (let i=0; i<args.length; i++) {
         if (args[i]===memo.args[i]) {
           continue;
         }
         else {
-          isSame=false;
+          hit=false;
           break;
         }
       }
-      return memo.result;
     }
-    memo.result = func(...args);
-    memo.args = args;
+    if (! hit) {
+      memo.result = func(args);
+      memo.args = args;
+    }
     return memo.result;
   };
 }
@@ -38,11 +44,10 @@ class SqlBuilder {
       throw new SyntaxError("Query not valid");
     }
     let ret = {};
-    let querySelect = query["SELECT"];
+    let querySelect = query["select"];
     for (let entity of Object.keys(querySelect)) {
       ret[entity] = this._generateSQL(entity,query);
     }
-    
     return ret;
   }
   
@@ -135,7 +140,31 @@ class SqlBuilder {
     }
     return true;
   }
-    
+  
+  _isValidQuery(query){
+    /*
+     * query must be an object containing proper "select"
+     * "filter" is optional, and by default will be set up null
+     * as downstream methods expect either a null or a proper filter
+     */
+    if (typeof query !== 'object'
+        || query === null
+        || !("select" in query)
+        ){
+      return false;
+    }
+    if ( !this._isValidQuerySelect(query.select) ){
+      return false;
+    }
+    query.filter = query.filter || null;
+    if ( "filter" in query
+        && !this._isValidQueryFilter(query.filter)
+        ) {
+      return false;
+    }
+    return true;
+  }
+  
   _isValidQuerySelect(querySelect) {
     let {schema} = this;
     // Entities are defined in schema
@@ -154,130 +183,203 @@ class SqlBuilder {
         }
       }
     }
-    // Entities in query.FILTER is defined in schema
-    for (let f of query["FILTER"]) {
-      for (let e of Object.keys(f)) {
-        if (! (e in schema)) {
-          return false;
-        }
-      }
-    }
-    // Entities attributes in query.FILTER is defined in schema
-    for (let f of query["FILTER"]) {
-      for (let e of Object.keys(f)){
-        let definedAttrs = schema[e]["ATTRIBUTE"];
-        let queryAttrs = Object.keys(f[e]);
-        for (let a of queryAttrs) {
-          if ( !(a in definedAttrs) ){
-            return false;
-          }
-        }
-      }
-    }
-    // Entities attributes filter operator is valid
-    this._isValidFilter(query["FILTER"]);
   }
 
-  _isValidFilter(filterNode) {
+  _isValidQueryFilter(queryFilter) {
+    if (queryilter === null) {
+      return true;
+    }
     let {schema} = this;
-    let {op,args} = filterNode;
-    switch (op) {
-      // Monadic
+    let dfsStack = [queryFilter];
+    let parentOpTypeStack = [null];
+    while (dfsStack.length!==0 ) {
+      let fNode = dfsStack.pop();
+      let parentOp = parentOpTypeStack.pop();
+      let valid = this._isValidFilterNode(fNode,parentOp);
+      if (!valid) {
+        return false;
+      }
+      if (let fn in fNode.filters) {
+        dfsStack.push(fn);
+        parentOpTypeStack.push(fNode.op);
+      }
+    }
+    return true;
+  }
+  
+  _isValidFilterNode(filterNode,parentOp) {
+    /* 
+     * filterNode comes in 2 flavours:
+     * 1) NOT, AND, OR
+     *    They can nest other filters; they do not accept variables
+     *    e.g. AND(filter1,filter2,OR(filter3,filter4))
+     * 2) =, <, >, ...
+     *    They canot nest other filters; thye accept variables
+     *    >(var,var2)
+     */
+    let {op} = filterNode;
+    // check node transition
+    switch(parentOp) {
+      // These can be followed by any nested filter
+      case null:
       case "NOT":
-        if (args.length !== 1) {
-          return false;
-        }
-        if (arg[0].op === "NOT") {
-          return false;
-        }
-     
-      // Logical+Polyadic
       case "AND":
       case "OR":
-        if (args.length <=1) {
-          return false;
-        }
-     
-      // Comparison+Dyadic
+        break;
+      // These cannot be followed by an nested filter, instead, must be followed by filter variables.
       case "=":
       case "<":
       case ">":
       case "<=":
       case ">=":
-      case "!<":
       case "!=":
-      case "<>":
-      case "!>":
-      case "!<=":
-      case "!>=":
       case "LIKE":
       case "NOT LIKE":
       case "IS":
       case "IS NOT":
-        if (args.length !== 2) {
-          return false;
-        }
-        if ( !(args.every(_isValidFilterLeaf)) ) {
-          return false;
-        }
-       
-      // Comparison+Triadic
       case "BETWEEN":
-      CASE "NOT BETWEEN":
-        if (args.length !== 3) {
-          return false;
-        }
-        if ( !(args.every(_isValidFilterLeaf)) ) {
-          return false;
-        }
-     
-      // Comparison+Polyadic
+      case "NOT BETWEEN":
       case "IN":
       case "NOT IN":
-        if (args.length < 2) {
-          return false;
-        }
-        if ( !(args.every(_isValidFilterLeaf)) ) {
-          return false;
-        }
-     
       default:
         return false;
     }
-    for (let arg of args) {
-      if ( !_isValidFilter(arg) ) {
+    // Check nested filter counts
+    switch (op) {
+      // Monadic
+      case "NOT":
+        if (!("filters" in filterNode)
+            || filterNode.filters.length !== 1
+            ) {
+          return false;
+        }
+        break;
+      // Logical+Polyadic
+      case "AND":
+      case "OR":
+        if (!("filters" in filterNode) 
+            || filterNode.filters..length <=1
+            ) {
+          return false;
+        }
+        break;
+      case "=":
+      case "<":
+      case ">":
+      case "<=":
+      case ">=":
+      case "!=":
+      case "LIKE":
+      case "NOT LIKE":
+      case "IS":
+      case "IS NOT":
+      case "BETWEEN":
+      case "NOT BETWEEN":
+        if ( "filters" in filterNode ) {
+          return false;
+        }
+        break;
+      default:
         return false;
+    }
+    // Check variable counts
+    switch (op) {
+      case "NOT":
+      case "AND":
+      case "OR":
+        if ("variables" in filterNode) {
+          return false;
+        }
+        break;
+      case "=":
+      case "<":
+      case ">":
+      case "<=":
+      case ">=":
+      case "!=":
+      case "LIKE":
+      case "NOT LIKE":
+      case "IS":
+      case "IS NOT":
+        if (!("variables" in filterNode)
+            || filterNode.variables.length !== 2
+            ) {
+          return false;
+        }
+        break;
+      case "BETWEEN":
+      case "NOT BETWEEN":
+        if (!("variables" in filterNode)
+            || filterNode.variables.length < 3
+            ) {
+          return false;
+        }
+        break;
+      default:
+        return false;
+     
+    }
+    // Check entity/attributes defined in filter variables against schema
+    if ("variables" in filterNode) {
+      for (let v of filterNode.variables){
+        if ( ! this._isValidFilterVariable(v) ) {
+          return false;
+        }
       }
     }
     return true;
   }
 
-  _isValidFilterLeaf(leaf) {
+  _isValidFilterVariable(filterVariable) {
     let {schema} = this;
-    if (leaf === null
-        || typeof leaf === "string"
-        || typeof leaf === "number"
-        || _isValidEntityAttribute(leaf)
+    if (filterVariable === null
+        || typeof filterVariable === "string"
+        || typeof filterVariable === "number"
+        || _isValidEntityAttribute(filterVariable)
         ) {
       return true;
     }
     return false;
   }
   
-  _isValidEntityAttribute(leaf) {
+  _isValidEntityAttribute(filterVariable) {
     let {schema} = this;
-    let filterableAttributes = this._getFilterableAttribute(schema);
-    if (leaf !== null
-        && typeof leaf === "object"
-        && typeof leaf.attribute === "string"
-        && leaf.attribute) {
+    if (filterVariable !== null
+        && typeof filterVariable === "object"
+        && typeof filterVariable.entity === "string"
+        && typeof filterVariable.attribute === "string"
+        && (filterVariable.entity in this.schema)
+        && (filterVariable.attribute in this.schema[filterVariable.entity])
+        ) {
       return true;
     }
     return false;
   }
+
+  _getFilterEntities(queryFilter) {
+    if (queryFilter === null) {
+      return [];
+    }
+    let dfsStask = [queryFilter];
+    let ret = [];
+    while (dfsStack.length !== 0){
+      let fNode = dfsStack.pop();
+      if ("filters" in fNode) {
+        dfsStack.push(...fNode.filters);
+      }
+      if ("variables" in fNode){
+        for (let v of fNode.variables){
+          if (typeof fNode === "object"
+              && fNode !== null
+              ){
+            ret.push(fNode.entity);
+          }
+        }
+      }
+    }
+    return ret;
+  }
   
-
-
   _generateSQL(entity,query) {
     let {schema} = this;
     let cteStatement = this._generateCTEStatement(entity,query);
@@ -297,6 +399,7 @@ class SqlBuilder {
     let statements = [];
     let includeCTE = {};
     includeCTE[entity] = null;
+    let entities = this._getFilterEntities(queryFilter);
     for (let filterSet of queryFilter) {
       for (let refE of Object.keys(filterSet)) {
         if (refE in includeCTE) {
@@ -338,54 +441,61 @@ class SqlBuilder {
   }
 
   _generateWhereStatement(entity,query) {
+    if (!("filter" in query)
+        || query["filter"] === null
+        ) {
+      return "";
+    }
     let {schema} = this;
-    let queryFilter = query["FILTER"];
-    let entityTable = schema[entity]["TABLE"];
-    let entityID = schema[entity]["ID"];
-    let orFilters = [];
-    let binds = [];
-    for (let filterSet of queryFilter) {
-      let andFilters = [];
-      for (let [refEntity, entityFilter] of Object.entries(filterSet) ) {
-        let subJoinStatement = this._generateJoinStatement(entity,refEntity);
-        let subFilterStatement = [];
-        for (let [attr,attrFilter] of Object.entries(entityFilter) ){
-          let [opStatement,opBinds] = this._generateOperatorStatement(attrFilter,binds.length+1);
-          subFilterStatement.push(`"${refEntity}"."${attr}" ${opStatement}`);
-          binds.push(...opBinds);
-        }
-        subFilterStatement = subFilterStatement.join(" AND ");
-        let filterString = `"${entity}"."__ID__" IN (SELECT "${entity}"."__ID__" FROM ${subJoinStatement} WHERE ${subFilterStatement})`;
-        andFilters.push(filterString);
-      }
-      orFilters.push(andFilters.join(" AND "));
-    }
-    // Return
-    if (orFilters.length===0) {
-      return ["",[]];
-    }
-    else {
-      let statement = orFilters.join(" OR ");
-      return [`WHERE ${statement}`,binds];
-    }
+    let queryFilter = query["filter"];
+    let entities = this._getFilterEntities(queryFilter);
+    let joinStatement = this._generateJoinStatement(entity,entities);
+    let filterStatement = this._generateFilterStatement(queryFilter);
+    return `WHERE "${entity}"."__ID__" IN (SELECT "${entity}"."__ID__" FROM ${joinStatement} WHERE ${filterStatement})`;
   }
 
-  _generateJoinStatement(entity1,entity2) {
+  _generateJoinStatement(entity1,entities) {
     // Assuming entities joinable
     let {schema} = this;
     let joinStatement = [entity1];
-    let joinOrder = this._resolveJoinOrder(entity1,entity2);
-    for (let i=0,j=1; j<joinOrder.length; i++,j++) {
-      let e1 = joinOrder[i];
-      let e2 = joinOrder[j];
-      let s = `JOIN "${e2}" ON `+this._generateAdjacentJoinOnStatement(e1,e2);
-      joinStatement.push(s);
+    let joinOrder = this._resolveJoinOrder(entity1,entities);
+    for (let joinPath of joinOrder){ 
+      for (let i=0,j=1; j<joinPath.length; i++,j++) {
+        let e1 = joinPath[i];
+        let e2 = joinPath[j];
+        let s = `JOIN "${e2}" ON `+this._generateAdjacentJoinOnStatement(e1,e2);
+        joinStatement.push(s);
+      }
     }
     return joinStatement.join(' ');
   }
+  
+  _resolveJoinOrder(entity1,entities){
+    let joinOrder = [];
+    let joined = {};
+    for (let entity2 of entities) {
+      let joinPath = this._resolveJoinPath(entity1,entity2);
+      // Remove joined entities from path
+      for (let i=0,j=1; j<joinPath.length; i++,j++) {
+        let e2 = joinPath[j];
+        if (e2 in joined) {
+          continue;
+        }
+        else {
+          joinPath = joinPath.slice(i);
+          break;
+        }
+      }
+      for (let i=1; i<joinPath.length; i++) {
+        joined[joinPath[i]] = null;
+      }
+      joinOrder.push(joinPath);
+    }
+    return joinOrder;
+  }
 
-  _resolveJoinOrder(entity1,entity2){
-    // Assuming both entities are found in schema and joinable
+  _resolveJoinPath(entity1,entity2){
+    // Assuming both entities are found in schema
     let {schema} = this;
     let graph = this._getUndirectedGraph(schema);
     let joinPathStack = [[]];
@@ -418,69 +528,63 @@ class SqlBuilder {
     // Either entity1 references entity2
     if ("REFERENCE" in schema[entity1] &&
         entity2 in schema[entity1]["REFERENCE"]) {
-      joinStatement = `"${entity1}"."__REF__${entity2}"="${entity2}"."__ID__"`;
+      joinOnStatement = `"${entity1}"."__REF__${entity2}"="${entity2}"."__ID__"`;
     }
     // Or entity2 references entity1
     else if ("REFERENCE" in schema[entity2] &&
         entity1 in schema[entity2]["REFERENCE"]) {
-      joinStatement = `"${entity1}"."__ID__"="${entity2}"."__REF__${entity1}"`;
+      joinOnStatement = `"${entity1}"."__ID__"="${entity2}"."__REF__${entity1}"`;
     }
     else {
-      throw new Error("Not adjacent entities");
+      throw new InternalError("Not adjacent entities");
     }
-    return joinStatement;
+    return joinOnStatement;
   }
 
-  _generateOperatorStatement(filterTree,count=0) {
-    let {op,args} = filterTree;
-    let statement = null;
-    let binds = null;
-   
+  _generateFilterStatement(filterNode,bindsCount) {
+    let {op,filters,variables} = filterNode;
     if (op === "NOT"){
-      let node = args[0];
-      let [statement,binds] = _generateOperatorStatement(node,count+binds.length);
+      let fn = filters[0];
+      let [statement,binds] = this._generateFilterStatement(fn,bindsCount+binds.length);
       statement = `NOT ${statement}`;
       return [statement,binds];
     }
-   
     else if (
         op === "AND"
         || op === "OR"
         ) {
-      statement = [];
-      binds = [];
-      for (let node of args) {
-        let [tmpStatement,tmpBinds] = _generateOperatorStatement(node,count+binds.length);
+      let statement = [];
+      let binds = [];
+      for (let fn of filters) {
+        let [tmpStatement,tmpBinds] = _generateOperatorStatement(fn,count+binds.length);
         statement.push( `(${tmpStatement})` );
         binds.push(...tmpBinds);
       }
       statement = statement.join(` ${op} `);
       return [statement,binds];
     }
-     
+    
     else if (
         op === "="
         || op === "<"
         || op === ">"
         || op === "<="
         || op === ">="
-        || op === "!<"
-        || op === "!>"
         || op === "!="
         || op === "LIKE"
         || op === "NOT LIKE"
         || op === "IS"
         || op === "IS NOT"
         ) {
-      statement = [];
-      binds = [];
-      for (let arg of args) {
-        if ( _isValidEntityAttribute(arg) ) {
-          statement.push(arg.attribute);
+      let statement = [];
+      let binds = [];
+      for (let fv of variables) {
+        if ( this._isValidEntityAttribute(fv) ) {
+          statement.push(`${fv.entity}.${fv.attribute}`);
         }
         else {
           statement.push( `:${count+binds.length}` );
-          binds.push(arg);
+          binds.push(fv);
         }
       }
       statement = statement.join(` ${op} `);
@@ -491,15 +595,15 @@ class SqlBuilder {
         op === "BETWEEN"
         || op === "NOT BETWEEN"
         ) {
-      statement = [];
-      binds = [];
-      for (let arg of args) {
-        if ( _isValidEntityAttribute(arg) ) {
-          statement.push(arg.attribute);
+      let statement = [];
+      let binds = [];
+      for (let fv of variables) {
+        if ( this._isValidEntityAttribute(fv) ) {
+          statement.push(`${fv.entity}.${fv.attribute}`);
         }
         else {
           statement.push( `:${count+binds.length}` );
-          binds.push(arg);
+          binds.push(fv);
         }
       }
       statement = `${statement[0]} ${op} ${statement[1]} AND ${statement[2]}`;
@@ -510,15 +614,15 @@ class SqlBuilder {
         op === "IN"
         || op === "NOT IN"
         ) {
-      statement = [];
-      binds = [];
-      for (let arg of args) {
-        if ( _isValidEntityAttribute(arg) ) {
-          statement.push(arg.attribute);
+      let statement = [];
+      let binds = [];
+      for (let fv of variables) {
+        if ( this._isValidEntityAttribute(fv) ) {
+          statement.push(`${fv.entity}.${fv.attribute}`);
         }
         else {
           statement.push( `:${count+binds.length}` );
-          binds.push(arg);
+          binds.push(fv);
         }
       }
       statement = `${statement[0]} %{op} (${statement.slice(1).join(',')})`;
@@ -530,27 +634,5 @@ class SqlBuilder {
     }
   }
 }
-
-SqlBuilder.VALID_FILTER_OPERATOR = {
-  "<":null,
-  "=":null,
-  ">":null,
-  "<=":null,
-  ">=":null,
-  "!<":null,
-  "!=":null,
-  "<>":null,
-  "!>":null,
-  "!<=":null,
-  "!>=":null,
-  "LIKE":null,
-  "NOT LIKE":null,
-  "IS":null,
-  "IS NOT":null,
-  "BETWEEN":null,
-  "NOT BETWEEN":null,
-  "IN":null,
-  "NOT IN":null,
-};
 
 module.exports = SqlBuilder;
