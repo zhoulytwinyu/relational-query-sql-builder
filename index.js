@@ -186,7 +186,7 @@ class SqlBuilder {
   }
 
   _isValidQueryFilter(queryFilter) {
-    if (queryFilter ===undefined 
+    if (queryFilter === undefined 
         || queryFilter === null
         ) {
       return true;
@@ -196,13 +196,12 @@ class SqlBuilder {
     // check filter structure
     while (dfsStack.length!==0 ) {
       let fn = dfsStack.pop();
-      this._isValidFilterNode(fn);
-      if (!valid) {
+      if ( !this._isValidFilterNode(fn) ) {
         return false;
       }
       if ("filters" in fn) {
-        for (let fn of fn.filters) {
-          dfsStack.push(fn);
+        for (let n of fn.filters) {
+          dfsStack.push(n);
         }
       }
     }
@@ -217,7 +216,7 @@ class SqlBuilder {
   }
   
   _isValidFilterNode(filterNode) {
-    if (typeof filterNode === object
+    if (typeof filterNode === "object"
         && filterNode !== null
         && "op" in filterNode
         && filterNode.op in this.constructor.FILTER_OPERATOR
@@ -445,8 +444,8 @@ class SqlBuilder {
   _generateFilterStatement(filterNode) {
     // Deep copy filter node
     // because I don't want to modify input. Being pure.
-    let filterNode = {...filterNode};
-    let dfsStack = [filterNode];
+    let filterNodeCopy = {...filterNode};
+    let dfsStack = [filterNodeCopy];
     while (dfsStack.length !== 0) {
       let fn = dfsStack.pop();
       if ("filters" in fn) {
@@ -458,25 +457,27 @@ class SqlBuilder {
     }
     // Prepare pre-order stack
     let preOrderStack = [];
-    dfsStack = [filterNode];
+    dfsStack = [filterNodeCopy];
     while (dfsStack.length !== 0) {
       let fn = dfsStack.pop();
       preOrderStack.push(fn);
       if ("filters" in fn){
-        for (for n in fn.filters) {
-          dfsStack.push(fn);
+        for (let n of fn.filters) {
+          dfsStack.push(n);
         }
       }
     }
     // Work out the result
+    let bindsCount = 1;
     while (preOrderStack.length !== 0) {
-      let node = preOrderStack.pop();
-      let [statement,binds] = this.constructor.FILTER_OPERATOR[node.op].generateStatement(node);
-      node.statement = statement;
-      node.binds = binds;
+      let fn = preOrderStack.pop();
+      let [statement,binds] = this.constructor.FILTER_OPERATOR[fn.op].generateStatement(fn,bindsCount);
+      fn.statement = statement;
+      fn.binds = binds;
+      bindsCount += binds.length;
     }
-    let statement = filterNode.statement;
-    let binds = filterNode.binds;
+    let statement = filterNodeCopy.statement;
+    let binds = filterNodeCopy.binds;
     return [statement,binds];
   }
 }
@@ -484,7 +485,7 @@ class SqlBuilder {
 SqlBuilder.FILTER_OPERATOR = {
   "NOT": {
     isValid: (fn) => {
-      if (typeof fn.filters === "array"
+      if (Array.isArray(fn.filters)
           && fn.filters.length === 1
           && fn.variables ===undefined
           ) {
@@ -501,7 +502,7 @@ SqlBuilder.FILTER_OPERATOR = {
   },
   "AND": {
     isValid: (fn) => {
-      if (typeof fn.filters === "array"
+      if (Array.isArray(fn.filters)
           && fn.filters.length >= 2
           && fn.variables === undefined
           ) {
@@ -512,13 +513,13 @@ SqlBuilder.FILTER_OPERATOR = {
     generateStatement: (fn)=> {
       let {filters} = fn;
       let statement = fn.filters.map( n=>n.statement ).join(" AND ");
-      let binds = [].concat(fn.filters.map( n=>n.binds ));
+      let binds = [].concat(...fn.filters.map( n=>n.binds ));
       return [statement,binds];
     }
   },
   "OR": {
     isValid: (fn) => {
-      if (typeof fn.filters === "array"
+      if (Array.isArray(fn.filters)
           && fn.filters.length >= 2
           && fn.variables === undefined
           ) {
@@ -528,14 +529,14 @@ SqlBuilder.FILTER_OPERATOR = {
     },
     generateStatement: (fn)=> {
       let statement = fn.filters.map( n=>n.statement ).join(" OR ");
-      let binds = [].concat(fn.filters.map( n=>n.binds ));
+      let binds = [].concat(...fn.filters.map( n=>n.binds ));
       return [statement,binds];
     }
   },
   "=": {
     isValid: (fn) => {
       if (fn.filters === undefined
-          typeof fn.variables === "array"
+          && Array.isArray(fn.variables)
           && fn.variables.length === 2
           ) {
         return true;
@@ -550,7 +551,7 @@ SqlBuilder.FILTER_OPERATOR = {
             || typeof v === "string"
             || typeof v === "number"
             ){
-          binds.push();
+          binds.push(v);
           inStatementVariables.push(`:${bindsCount}`);
         }
         else { // v is {entity:"xxx",attribute:"xxxxx"}
@@ -564,7 +565,7 @@ SqlBuilder.FILTER_OPERATOR = {
   "<": {
     isValid: (fn) => {
       if (fn.filters === undefined
-          typeof fn.variables === "array"
+          && Array.isArray(fn.variables)
           && fn.variables.length === 2
           ) {
         return true;
@@ -579,7 +580,7 @@ SqlBuilder.FILTER_OPERATOR = {
             || typeof v === "string"
             || typeof v === "number"
             ){
-          binds.push();
+          binds.push(v);
           inStatementVariables.push(`:${bindsCount}`);
         }
         else { // v is {entity:"xxx",attribute:"xxxxx"}
@@ -593,7 +594,7 @@ SqlBuilder.FILTER_OPERATOR = {
   ">":{
     isValid: (fn) => {
       if (fn.filters === undefined
-          typeof fn.variables === "array"
+          && Array.isArray(fn.variables)
           && fn.variables.length === 2
           ) {
         return true;
@@ -608,7 +609,7 @@ SqlBuilder.FILTER_OPERATOR = {
             || typeof v === "string"
             || typeof v === "number"
             ){
-          binds.push();
+          binds.push(v);
           inStatementVariables.push(`:${bindsCount}`);
         }
         else { // v is {entity:"xxx",attribute:"xxxxx"}
@@ -622,7 +623,7 @@ SqlBuilder.FILTER_OPERATOR = {
   "<=":{
     isValid: (fn) => {
       if (fn.filters === undefined
-          typeof fn.variables === "array"
+          && Array.isArray(fn.variables)
           && fn.variables.length === 2
           ) {
         return true;
@@ -637,7 +638,7 @@ SqlBuilder.FILTER_OPERATOR = {
             || typeof v === "string"
             || typeof v === "number"
             ){
-          binds.push();
+          binds.push(v);
           inStatementVariables.push(`:${bindsCount}`);
         }
         else { // v is {entity:"xxx",attribute:"xxxxx"}
@@ -651,7 +652,7 @@ SqlBuilder.FILTER_OPERATOR = {
   ">=":{
     isValid: (fn) => {
       if (fn.filters === undefined
-          typeof fn.variables === "array"
+          && Array.isArray(fn.variables)
           && fn.variables.length === 2
           ) {
         return true;
@@ -666,7 +667,7 @@ SqlBuilder.FILTER_OPERATOR = {
             || typeof v === "string"
             || typeof v === "number"
             ){
-          binds.push();
+          binds.push(v);
           inStatementVariables.push(`:${bindsCount}`);
         }
         else { // v is {entity:"xxx",attribute:"xxxxx"}
@@ -680,7 +681,7 @@ SqlBuilder.FILTER_OPERATOR = {
   "!=":{
     isValid: (fn) => {
       if (fn.filters === undefined
-          typeof fn.variables === "array"
+          && Array.isArray(fn.variables)
           && fn.variables.length === 2
           ) {
         return true;
@@ -695,7 +696,7 @@ SqlBuilder.FILTER_OPERATOR = {
             || typeof v === "string"
             || typeof v === "number"
             ){
-          binds.push();
+          binds.push(v);
           inStatementVariables.push(`:${bindsCount}`);
         }
         else { // v is {entity:"xxx",attribute:"xxxxx"}
@@ -709,7 +710,7 @@ SqlBuilder.FILTER_OPERATOR = {
   "LIKE": {
     isValid: (fn) => {
       if (fn.filters === undefined
-          typeof fn.variables === "array"
+          && Array.isArray(fn.variables)
           && fn.variables.length === 2
           ) {
         return true;
@@ -724,7 +725,7 @@ SqlBuilder.FILTER_OPERATOR = {
             || typeof v === "string"
             || typeof v === "number"
             ){
-          binds.push();
+          binds.push(v);
           inStatementVariables.push(`:${bindsCount}`);
         }
         else { // v is {entity:"xxx",attribute:"xxxxx"}
@@ -738,7 +739,7 @@ SqlBuilder.FILTER_OPERATOR = {
   "NOT LIKE": {
     isValid: (fn) => {
       if (fn.filters === undefined
-          typeof fn.variables === "array"
+          && Array.isArray(fn.variables)
           && fn.variables.length === 2
           ) {
         return true;
@@ -753,7 +754,7 @@ SqlBuilder.FILTER_OPERATOR = {
             || typeof v === "string"
             || typeof v === "number"
             ){
-          binds.push();
+          binds.push(v);
           inStatementVariables.push(`:${bindsCount}`);
         }
         else { // v is {entity:"xxx",attribute:"xxxxx"}
@@ -767,7 +768,7 @@ SqlBuilder.FILTER_OPERATOR = {
   "IS": {
     isValid: (fn) => {
       if (fn.filters === undefined
-          typeof fn.variables === "array"
+          && Array.isArray(fn.variables)
           && fn.variables.length === 2
           ) {
         return true;
@@ -782,7 +783,7 @@ SqlBuilder.FILTER_OPERATOR = {
             || typeof v === "string"
             || typeof v === "number"
             ){
-          binds.push();
+          binds.push(v);
           inStatementVariables.push(`:${bindsCount}`);
         }
         else { // v is {entity:"xxx",attribute:"xxxxx"}
@@ -796,7 +797,7 @@ SqlBuilder.FILTER_OPERATOR = {
   "IS NOT": {
     isValid: (fn) => {
       if (fn.filters === undefined
-          typeof fn.variables === "array"
+          && Array.isArray(fn.variables)
           && fn.variables.length === 2
           ) {
         return true;
@@ -811,7 +812,7 @@ SqlBuilder.FILTER_OPERATOR = {
             || typeof v === "string"
             || typeof v === "number"
             ){
-          binds.push();
+          binds.push(v);
           inStatementVariables.push(`:${bindsCount}`);
         }
         else { // v is {entity:"xxx",attribute:"xxxxx"}
@@ -825,7 +826,7 @@ SqlBuilder.FILTER_OPERATOR = {
   "BETWEEN": {
     isValid: (fn) => {
       if (fn.filters === undefined
-          typeof fn.variables === "array"
+          && Array.isArray(fn.variables)
           && fn.variables.length === 2
           ) {
         return true;
@@ -840,7 +841,7 @@ SqlBuilder.FILTER_OPERATOR = {
             || typeof v === "string"
             || typeof v === "number"
             ){
-          binds.push();
+          binds.push(v);
           inStatementVariables.push(`:${bindsCount}`);
         }
         else { // v is {entity:"xxx",attribute:"xxxxx"}
@@ -854,7 +855,7 @@ SqlBuilder.FILTER_OPERATOR = {
   "NOT BETWEEN": {
     isValid: (fn) => {
       if (fn.filters === undefined
-          typeof fn.variables === "array"
+          && Array.isArray(fn.variables)
           && fn.variables.length === 2
           ) {
         return true;
@@ -869,7 +870,7 @@ SqlBuilder.FILTER_OPERATOR = {
             || typeof v === "string"
             || typeof v === "number"
             ){
-          binds.push();
+          binds.push(v);
           inStatementVariables.push(`:${bindsCount}`);
         }
         else { // v is {entity:"xxx",attribute:"xxxxx"}
@@ -883,7 +884,7 @@ SqlBuilder.FILTER_OPERATOR = {
   "IN": {
     isValid: (fn) => {
       if (fn.filters === undefined
-          typeof fn.variables === "array"
+          && Array.isArray(fn.variables)
           && fn.variables.length === 2
           ) {
         return true;
@@ -898,7 +899,7 @@ SqlBuilder.FILTER_OPERATOR = {
             || typeof v === "string"
             || typeof v === "number"
             ){
-          binds.push();
+          binds.push(v);
           inStatementVariables.push(`:${bindsCount}`);
         }
         else { // v is {entity:"xxx",attribute:"xxxxx"}
@@ -912,7 +913,7 @@ SqlBuilder.FILTER_OPERATOR = {
   "NOT IN": {
     isValid: (fn) => {
       if (fn.filters === undefined
-          typeof fn.variables === "array"
+          && Array.isArray(fn.variables)
           && fn.variables.length === 2
           ) {
         return true;
@@ -927,7 +928,7 @@ SqlBuilder.FILTER_OPERATOR = {
             || typeof v === "string"
             || typeof v === "number"
             ){
-          binds.push();
+          binds.push(v);
           inStatementVariables.push(`:${bindsCount}`);
         }
         else { // v is {entity:"xxx",attribute:"xxxxx"}
