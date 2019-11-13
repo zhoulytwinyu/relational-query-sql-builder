@@ -5,7 +5,7 @@ function memoize_one(func) {
   };
   return function(...args) {
     if (memo.args===undefined) {
-      memo.result = func(args);
+      memo.result = func(...args);
       memo.args = args;
       return memo.result;
     }
@@ -22,7 +22,7 @@ function memoize_one(func) {
       }
     }
     if (! hit) {
-      memo.result = func(args);
+      memo.result = func(...args);
       memo.args = args;
     }
     return memo.result;
@@ -37,6 +37,10 @@ class SqlBuilder {
     else {
       throw new SyntaxError("Schema not valid");
     }
+    // setup memoization
+    this._getUndirectedGraph = memoize_one( this._getUndirectedGraph.bind(this) );
+    this._getFilterEntities = memoize_one( this._getFilterEntities.bind(this) );
+    this._generateFilterStatement = memoize_one( this._generateFilterStatement.bind(this) );
   }
   
   buildSQL(query) {
@@ -44,7 +48,7 @@ class SqlBuilder {
       throw new SyntaxError("Query not valid");
     }
     let ret = {};
-    let querySelect = query["select"];
+    let querySelect = query.select;
     for (let entity of Object.keys(querySelect)) {
       ret[entity] = this._generateSQL(entity,query);
     }
@@ -417,9 +421,9 @@ class SqlBuilder {
     let queryAttrs = {...querySelect[entity]};
     queryAttrs["__ID__"] = null;
     if ("references" in schema[entity]) {
-      for ( let [refEntity,id] of Object.entries(schema[entity].references) ) {
+      for ( let refEntity of Object.keys(schema[entity].references) ) {
         if (refEntity in querySelect) {
-          queryAttrs[`__REF__${refEntity}`];
+          queryAttrs[`__REF__${refEntity}`] = null;
         }
       }
     }
@@ -435,12 +439,12 @@ class SqlBuilder {
 
   _generateWhereStatement(entity,query) {
     if (!("filter" in query)
-        || query["filter"] === null
+        || query.filter === null
         ) {
-      return "";
+      return ["",[]];
     }
     let {schema} = this;
-    let queryFilter = query["filter"];
+    let queryFilter = query.filter;
     let entities = this._getFilterEntities(queryFilter);
     let joinStatement = this._generateJoinStatement(entity,entities);
     let [filterStatement,binds] = this._generateFilterStatement(queryFilter);
@@ -537,97 +541,133 @@ class SqlBuilder {
     return joinOnStatement;
   }
 
-  _generateFilterStatement(filterNode,bindsCount) {
-    let {op,filters,variables} = filterNode;
-    if (op === "NOT"){
-      let fn = filters[0];
-      let [statement,binds] = this._generateFilterStatement(fn,bindsCount);
-      statement = `NOT ${statement}`;
-      return [statement,binds];
-    }
-    else if (
-        op === "AND"
-        || op === "OR"
-        ) {
-      let statement = [];
-      let binds = [];
-      for (let fn of filters) {
-        let [tmpStatement,tmpBinds] = this._generateFilterStatement(fn,bindsCount+binds.length);
-        statement.push( `(${tmpStatement})` );
-        binds.push(...tmpBinds);
+  _generateFilterStatement(filterNode) {
+    let dfsStack = [filterNode];
+    let preOrderStack = [];
+    let statementStack = [];
+    let binds = [];
+    // Prepare pre-order stack
+    while (dfsStack.length !== 0) {
+      let node = dfsStack.pop();
+      preOrderStack.push(node);
+      if (
+          node.op === "="
+          || node.op === "<"
+          || node.op === ">"
+          || node.op === "<="
+          || node.op === ">="
+          || node.op === "!="
+          || node.op === "LIKE"
+          || node.op === "NOT LIKE"
+          || node.op === "IS"
+          || node.op === "IS NOT"
+          || node.op === "BETWEEN"
+          || node.op === "NOT BETWEEN"
+          || node.op === "IN"
+          || node.op === "NOT IN"
+          ) {
+        continue;
       }
-      statement = statement.join(` ${op} `);
-      return [statement,binds];
-    }
-    
-    else if (
-        op === "="
-        || op === "<"
-        || op === ">"
-        || op === "<="
-        || op === ">="
-        || op === "!="
-        || op === "LIKE"
-        || op === "NOT LIKE"
-        || op === "IS"
-        || op === "IS NOT"
-        ) {
-      let statement = [];
-      let binds = [];
-      for (let fv of variables) {
-        if ( this._isValidEntityAttribute(fv) ) {
-          statement.push(`${fv.entity}.${fv.attribute}`);
-        }
-        else {
-          statement.push( `:${bindsCount+binds.length}` );
-          binds.push(fv);
-        }
+      else if (node.op === "NOT"){
+        dfsStack.push(node.filters[0]);
       }
-      statement = statement.join(` ${op} `);
-      return [statement,binds];
-    }
-   
-    else if (
-        op === "BETWEEN"
-        || op === "NOT BETWEEN"
-        ) {
-      let statement = [];
-      let binds = [];
-      for (let fv of variables) {
-        if ( this._isValidEntityAttribute(fv) ) {
-          statement.push(`${fv.entity}.${fv.attribute}`);
-        }
-        else {
-          statement.push( `:${bindsCount+binds.length}` );
-          binds.push(fv);
-        }
+      else if (
+          node.op === "AND"
+          || node.op === "OR"
+          ) {
+        dfsStack.push(...node.filters);
       }
-      statement = `${statement[0]} ${op} ${statement[1]} AND ${statement[2]}`;
-      return [statement,binds];
-    }
-   
-    else if (
-        op === "IN"
-        || op === "NOT IN"
-        ) {
-      let statement = [];
-      let binds = [];
-      for (let fv of variables) {
-        if ( this._isValidEntityAttribute(fv) ) {
-          statement.push(`${fv.entity}.${fv.attribute}`);
-        }
-        else {
-          statement.push( `:${bindsCount+binds.length}` );
-          binds.push(fv);
-        }
+      else {
+        throw new Error("Filter parsing error");
       }
-      statement = `${statement[0]} %{op} (${statement.slice(1).join(',')})`;
-      return [statement,binds];
     }
-   
-    else {
-      throw new Error("Filter parsing error");
+    // Work out the result
+    while (preOrderStack.length !== 0) {
+      let node = preOrderStack.pop();
+      if (
+          node.op === "="
+          || node.op === "<"
+          || node.op === ">"
+          || node.op === "<="
+          || node.op === ">="
+          || node.op === "!="
+          || node.op === "LIKE"
+          || node.op === "NOT LIKE"
+          || node.op === "IS"
+          || node.op === "IS NOT"
+          ) {
+        let statement = [];
+        for (let fv of node.variables) {
+          if ( this._isValidEntityAttribute(fv) ) {
+            statement.push(`${fv.entity}.${fv.attribute}`);
+          }
+          else {
+            statement.push( `:${binds.length}` );
+            binds.push(fv);
+          }
+        }
+        statement = statement.join(` ${node.op} `);
+        statementStack.push( statement );
+      }
+      else if (
+          node.op === "BETWEEN"
+          || node.op === "NOT BETWEEN"
+          ) {
+        let statement = [];
+        for (let fv of node.variables) {
+          if ( this._isValidEntityAttribute(fv) ) {
+            statement.push(`${fv.entity}.${fv.attribute}`);
+          }
+          else {
+            statement.push( `:${binds.length}` );
+            binds.push(fv);
+          }
+        }
+        statement = `${statement[0]} ${node.op} ${statement[1]} AND ${statement[2]}`;
+        statementStack.push( statement );
+      }
+      else if (
+          node.op === "IN"
+          || node.op === "NOT IN"
+          ) {
+        let statement = [];
+        for (let fv of node.variables) {
+          if ( this._isValidEntityAttribute(fv) ) {
+            statement.push(`${fv.entity}.${fv.attribute}`);
+          }
+          else {
+            statement.push( `:${binds.length}` );
+            binds.push(fv);
+          }
+        }
+        statement = `${statement[0]} %{op} (${statement.slice(1).join(',')})`;
+        statementStack.push( statement );
+      }
+      else if (node.op === "NOT"){
+        let numNode = 1;
+        let childStatements = statementStack.slice(-numNode);
+        statementStack = statementStack.slice(0,-numNode);
+        let statement = `NOT (${childStatements[0]})`;
+        statementStack.push( statement );
+      }
+      else if (
+          node.op === "AND"
+          || node.op === "OR"
+          ) {
+        let numNode = node.filters.length;
+        let childStatements = statementStack.slice(-numNode);
+        statementStack = statementStack.slice(0,-numNode);
+        let statement = childStatements.map(s=>`(${s})`)
+          .join(` ${node.op} `);
+        statementStack.push( statement );
+      }
+     
+      else {
+        throw new Error("Filter parsing error");
+      }
     }
+    let statement = statementStack.pop();
+    return [statement,binds];
   }
 }
 
