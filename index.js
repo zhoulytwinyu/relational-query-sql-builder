@@ -156,14 +156,12 @@ class SqlBuilder {
         ){
       return false;
     }
-    if ( !this._isValidQuerySelect(query.select) ){
-      return false;
+    if (this._isValidQuerySelect(query.select)
+        && this._isValidQueryFilter(query.filter)
+        ) {
+      return true;
     }
-    query.filter = query.filter || null;
-    if ( !this._isValidQueryFilter(query.filter) ) {
-      return false;
-    }
-    return true;
+    return false;
   }
   
   _isValidQuerySelect(querySelect) {
@@ -188,154 +186,51 @@ class SqlBuilder {
   }
 
   _isValidQueryFilter(queryFilter) {
-    if (queryFilter === null) {
+    if (queryFilter ===undefined 
+        || queryFilter === null
+        ) {
       return true;
     }
     let {schema} = this;
     let dfsStack = [queryFilter];
-    let parentOpTypeStack = [null];
+    // check filter structure
     while (dfsStack.length!==0 ) {
-      let fNode = dfsStack.pop();
-      let parentOp = parentOpTypeStack.pop();
-      let valid = this._isValidFilterNode(fNode,parentOp);
+      let fn = dfsStack.pop();
+      this._isValidFilterNode(fn);
       if (!valid) {
         return false;
       }
-      if ("filters" in fNode) {
-        for (let fn of fNode.filters) {
+      if ("filters" in fn) {
+        for (let fn of fn.filters) {
           dfsStack.push(fn);
-          parentOpTypeStack.push(fNode.op);
         }
+      }
+    }
+    // check filter entity attribute against schema
+    let variables = this._getFilterVariables(queryFilter);
+    for (let v of variables) {
+      if ( !this._isValidFilterVariable(v) ) {
+        return false;
       }
     }
     return true;
   }
   
-  _isValidFilterNode(filterNode,parentOp) {
-    /* 
-     * filterNode comes in 2 flavours:
-     * 1) NOT, AND, OR
-     *    They can nest other filters; they do not accept variables
-     *    e.g. AND(filter1,filter2,OR(filter3,filter4))
-     * 2) =, <, >, ...
-     *    They canot nest other filters; thye accept variables
-     *    >(var,var2)
-     */
-    let {op} = filterNode;
-    // check node transition
-    switch(parentOp) {
-      // These can be followed by any nested filter
-      case null:
-      case "NOT":
-      case "AND":
-      case "OR":
-        break;
-      // These cannot be followed by an nested filter, instead, must be followed by filter variables.
-      case "=":
-      case "<":
-      case ">":
-      case "<=":
-      case ">=":
-      case "!=":
-      case "LIKE":
-      case "NOT LIKE":
-      case "IS":
-      case "IS NOT":
-      case "BETWEEN":
-      case "NOT BETWEEN":
-      case "IN":
-      case "NOT IN":
-      default:
-        return false;
-    }
-    // Check nested filter counts
-    switch (op) {
-      // Monadic
-      case "NOT":
-        if (!("filters" in filterNode)
-            || filterNode.filters.length !== 1
-            ) {
-          return false;
-        }
-        break;
-      // Logical+Polyadic
-      case "AND":
-      case "OR":
-        if (!("filters" in filterNode) 
-            || filterNode.filters.length <=1
-            ) {
-          return false;
-        }
-        break;
-      case "=":
-      case "<":
-      case ">":
-      case "<=":
-      case ">=":
-      case "!=":
-      case "LIKE":
-      case "NOT LIKE":
-      case "IS":
-      case "IS NOT":
-      case "BETWEEN":
-      case "NOT BETWEEN":
-        if ( "filters" in filterNode ) {
-          return false;
-        }
-        break;
-      default:
-        return false;
-    }
-    // Check variable counts
-    switch (op) {
-      case "NOT":
-      case "AND":
-      case "OR":
-        if ("variables" in filterNode) {
-          return false;
-        }
-        break;
-      case "=":
-      case "<":
-      case ">":
-      case "<=":
-      case ">=":
-      case "!=":
-      case "LIKE":
-      case "NOT LIKE":
-      case "IS":
-      case "IS NOT":
-        if (!("variables" in filterNode)
-            || filterNode.variables.length !== 2
-            ) {
-          return false;
-        }
-        break;
-      case "BETWEEN":
-      case "NOT BETWEEN":
-        if (!("variables" in filterNode)
-            || filterNode.variables.length < 3
-            ) {
-          return false;
-        }
-        break;
-      default:
-        return false;
-     
-    }
-    // Check entity/attributes defined in filter variables against schema
-    if ("variables" in filterNode) {
-      for (let v of filterNode.variables){
-        if ( ! this._isValidFilterVariable(v) ) {
-          return false;
-        }
+  _isValidFilterNode(filterNode) {
+    if (typeof filterNode === object
+        && filterNode !== null
+        && "op" in filterNode
+        && filterNode.op in this.constructor.FILTER_OPERATOR
+        ){
+      let valid = this.constructor.FILTER_OPERATOR[filterNode.op].isValid(filterNode);
+      if (valid) {
+        return true;
       }
     }
-    return true;
+    return false;
   }
 
   _isValidFilterVariable(filterVariable) {
-    let {schema} = this;
     if (filterVariable === null
         || typeof filterVariable === "string"
         || typeof filterVariable === "number"
@@ -360,7 +255,7 @@ class SqlBuilder {
     return false;
   }
 
-  _getFilterEntities(queryFilter) {
+  _getFilterVariables(queryFilter) {
     if (queryFilter === null) {
       return [];
     }
@@ -372,13 +267,19 @@ class SqlBuilder {
         dfsStack.push(...fNode.filters);
       }
       if ("variables" in fNode){
-        for (let v of fNode.variables){
-          if (typeof v === "object"
-              && v !== null
-              ){
-            ret.push(v.entity);
-          }
-        }
+        ret.push(...fNode.variables);
+      }
+    }
+    return ret;
+  }
+  
+  _getFilterEntities(queryFilter) {
+    let ret = [];
+    for (let v of this._getFilterVariables(queryFilter)) {
+      if (typeof v === "object"
+          && v !== null
+          ) {
+        ret.push(v.entity);
       }
     }
     return [...new Set(ret)];
@@ -542,133 +443,501 @@ class SqlBuilder {
   }
 
   _generateFilterStatement(filterNode) {
+    // Deep copy filter node
+    // because I don't want to modify input. Being pure.
+    let filterNode = {...filterNode};
     let dfsStack = [filterNode];
-    let preOrderStack = [];
-    let statementStack = [];
-    let binds = [];
-    // Prepare pre-order stack
     while (dfsStack.length !== 0) {
-      let node = dfsStack.pop();
-      preOrderStack.push(node);
-      if (
-          node.op === "="
-          || node.op === "<"
-          || node.op === ">"
-          || node.op === "<="
-          || node.op === ">="
-          || node.op === "!="
-          || node.op === "LIKE"
-          || node.op === "NOT LIKE"
-          || node.op === "IS"
-          || node.op === "IS NOT"
-          || node.op === "BETWEEN"
-          || node.op === "NOT BETWEEN"
-          || node.op === "IN"
-          || node.op === "NOT IN"
-          ) {
-        continue;
+      let fn = dfsStack.pop();
+      if ("filters" in fn) {
+        fn.filters = fn.filters.map( n=>({...n}) );
+        for (let n of fn.filters) {
+          dfsStack.push(n);
+        }
       }
-      else if (node.op === "NOT"){
-        dfsStack.push(node.filters[0]);
-      }
-      else if (
-          node.op === "AND"
-          || node.op === "OR"
-          ) {
-        dfsStack.push(...node.filters);
-      }
-      else {
-        throw new Error("Filter parsing error");
+    }
+    // Prepare pre-order stack
+    let preOrderStack = [];
+    dfsStack = [filterNode];
+    while (dfsStack.length !== 0) {
+      let fn = dfsStack.pop();
+      preOrderStack.push(fn);
+      if ("filters" in fn){
+        for (for n in fn.filters) {
+          dfsStack.push(fn);
+        }
       }
     }
     // Work out the result
     while (preOrderStack.length !== 0) {
       let node = preOrderStack.pop();
-      if (
-          node.op === "="
-          || node.op === "<"
-          || node.op === ">"
-          || node.op === "<="
-          || node.op === ">="
-          || node.op === "!="
-          || node.op === "LIKE"
-          || node.op === "NOT LIKE"
-          || node.op === "IS"
-          || node.op === "IS NOT"
-          ) {
-        let statement = [];
-        for (let fv of node.variables) {
-          if ( this._isValidEntityAttribute(fv) ) {
-            statement.push(`${fv.entity}.${fv.attribute}`);
-          }
-          else {
-            statement.push( `:${binds.length}` );
-            binds.push(fv);
-          }
-        }
-        statement = statement.join(` ${node.op} `);
-        statementStack.push( statement );
-      }
-      else if (
-          node.op === "BETWEEN"
-          || node.op === "NOT BETWEEN"
-          ) {
-        let statement = [];
-        for (let fv of node.variables) {
-          if ( this._isValidEntityAttribute(fv) ) {
-            statement.push(`${fv.entity}.${fv.attribute}`);
-          }
-          else {
-            statement.push( `:${binds.length}` );
-            binds.push(fv);
-          }
-        }
-        statement = `${statement[0]} ${node.op} ${statement[1]} AND ${statement[2]}`;
-        statementStack.push( statement );
-      }
-      else if (
-          node.op === "IN"
-          || node.op === "NOT IN"
-          ) {
-        let statement = [];
-        for (let fv of node.variables) {
-          if ( this._isValidEntityAttribute(fv) ) {
-            statement.push(`${fv.entity}.${fv.attribute}`);
-          }
-          else {
-            statement.push( `:${binds.length}` );
-            binds.push(fv);
-          }
-        }
-        statement = `${statement[0]} %{op} (${statement.slice(1).join(',')})`;
-        statementStack.push( statement );
-      }
-      else if (node.op === "NOT"){
-        let numNode = 1;
-        let childStatements = statementStack.slice(-numNode);
-        statementStack = statementStack.slice(0,-numNode);
-        let statement = `NOT (${childStatements[0]})`;
-        statementStack.push( statement );
-      }
-      else if (
-          node.op === "AND"
-          || node.op === "OR"
-          ) {
-        let numNode = node.filters.length;
-        let childStatements = statementStack.slice(-numNode);
-        statementStack = statementStack.slice(0,-numNode);
-        let statement = childStatements.map(s=>`(${s})`)
-          .join(` ${node.op} `);
-        statementStack.push( statement );
-      }
-     
-      else {
-        throw new Error("Filter parsing error");
-      }
+      let [statement,binds] = this.constructor.FILTER_OPERATOR[node.op].generateStatement(node);
+      node.statement = statement;
+      node.binds = binds;
     }
-    let statement = statementStack.pop();
+    let statement = filterNode.statement;
+    let binds = filterNode.binds;
     return [statement,binds];
   }
+}
+
+SqlBuilder.FILTER_OPERATOR = {
+  "NOT": {
+    isValid: (fn) => {
+      if (typeof fn.filters === "array"
+          && fn.filters.length === 1
+          && fn.variables ===undefined
+          ) {
+        return true;
+      }
+      return false;
+    },
+    generateStatement: (fn)=> {
+      let {filters} = fn;
+      let statement = "NOT "+fn.filters[0].statement;
+      let binds = fn.filters[0].binds;
+      return [statement,binds];
+    }
+  },
+  "AND": {
+    isValid: (fn) => {
+      if (typeof fn.filters === "array"
+          && fn.filters.length >= 2
+          && fn.variables === undefined
+          ) {
+        return true;
+      }
+      return false;
+    },
+    generateStatement: (fn)=> {
+      let {filters} = fn;
+      let statement = fn.filters.map( n=>n.statement ).join(" AND ");
+      let binds = [].concat(fn.filters.map( n=>n.binds ));
+      return [statement,binds];
+    }
+  },
+  "OR": {
+    isValid: (fn) => {
+      if (typeof fn.filters === "array"
+          && fn.filters.length >= 2
+          && fn.variables === undefined
+          ) {
+        return true;
+      }
+      return false;
+    },
+    generateStatement: (fn)=> {
+      let statement = fn.filters.map( n=>n.statement ).join(" OR ");
+      let binds = [].concat(fn.filters.map( n=>n.binds ));
+      return [statement,binds];
+    }
+  },
+  "=": {
+    isValid: (fn) => {
+      if (fn.filters === undefined
+          typeof fn.variables === "array"
+          && fn.variables.length === 2
+          ) {
+        return true;
+      }
+      return false;
+    },
+    generateStatement: (fn,bindsCount)=> {
+      let binds = [];
+      let inStatementVariables = [];
+      for (let v of fn.variables) {
+        if (v===null
+            || typeof v === "string"
+            || typeof v === "number"
+            ){
+          binds.push();
+          inStatementVariables.push(`:${bindsCount}`);
+        }
+        else { // v is {entity:"xxx",attribute:"xxxxx"}
+          inStatementVariables.push(`"${v.entity}"."${v.attribute}"`);
+        }
+      }
+      let statement = inStatementVariables.join("=");
+      return [statement,binds];
+    }
+  },
+  "<": {
+    isValid: (fn) => {
+      if (fn.filters === undefined
+          typeof fn.variables === "array"
+          && fn.variables.length === 2
+          ) {
+        return true;
+      }
+      return false;
+    },
+    generateStatement: (fn,bindsCount)=> {
+      let binds = [];
+      let inStatementVariables = [];
+      for (let v of fn.variables) {
+        if (v===null
+            || typeof v === "string"
+            || typeof v === "number"
+            ){
+          binds.push();
+          inStatementVariables.push(`:${bindsCount}`);
+        }
+        else { // v is {entity:"xxx",attribute:"xxxxx"}
+          inStatementVariables.push(`"${v.entity}"."${v.attribute}"`);
+        }
+      }
+      let statement = inStatementVariables.join("<");
+      return [statement,binds];
+    }
+  },
+  ">":{
+    isValid: (fn) => {
+      if (fn.filters === undefined
+          typeof fn.variables === "array"
+          && fn.variables.length === 2
+          ) {
+        return true;
+      }
+      return false;
+    },
+    generateStatement: (fn,bindsCount)=> {
+      let binds = [];
+      let inStatementVariables = [];
+      for (let v of fn.variables) {
+        if (v===null
+            || typeof v === "string"
+            || typeof v === "number"
+            ){
+          binds.push();
+          inStatementVariables.push(`:${bindsCount}`);
+        }
+        else { // v is {entity:"xxx",attribute:"xxxxx"}
+          inStatementVariables.push(`"${v.entity}"."${v.attribute}"`);
+        }
+      }
+      let statement = inStatementVariables.join(">");
+      return [statement,binds];
+    }
+  },
+  "<=":{
+    isValid: (fn) => {
+      if (fn.filters === undefined
+          typeof fn.variables === "array"
+          && fn.variables.length === 2
+          ) {
+        return true;
+      }
+      return false;
+    },
+    generateStatement: (fn,bindsCount)=> {
+      let binds = [];
+      let inStatementVariables = [];
+      for (let v of fn.variables) {
+        if (v===null
+            || typeof v === "string"
+            || typeof v === "number"
+            ){
+          binds.push();
+          inStatementVariables.push(`:${bindsCount}`);
+        }
+        else { // v is {entity:"xxx",attribute:"xxxxx"}
+          inStatementVariables.push(`"${v.entity}"."${v.attribute}"`);
+        }
+      }
+      let statement = inStatementVariables.join("<=");
+      return [statement,binds];
+    }
+  },
+  ">=":{
+    isValid: (fn) => {
+      if (fn.filters === undefined
+          typeof fn.variables === "array"
+          && fn.variables.length === 2
+          ) {
+        return true;
+      }
+      return false;
+    },
+    generateStatement: (fn,bindsCount)=> {
+      let binds = [];
+      let inStatementVariables = [];
+      for (let v of fn.variables) {
+        if (v===null
+            || typeof v === "string"
+            || typeof v === "number"
+            ){
+          binds.push();
+          inStatementVariables.push(`:${bindsCount}`);
+        }
+        else { // v is {entity:"xxx",attribute:"xxxxx"}
+          inStatementVariables.push(`"${v.entity}"."${v.attribute}"`);
+        }
+      }
+      let statement = inStatementVariables.join(">=");
+      return [statement,binds];
+    }
+  },
+  "!=":{
+    isValid: (fn) => {
+      if (fn.filters === undefined
+          typeof fn.variables === "array"
+          && fn.variables.length === 2
+          ) {
+        return true;
+      }
+      return false;
+    },
+    generateStatement: (fn,bindsCount)=> {
+      let binds = [];
+      let inStatementVariables = [];
+      for (let v of fn.variables) {
+        if (v===null
+            || typeof v === "string"
+            || typeof v === "number"
+            ){
+          binds.push();
+          inStatementVariables.push(`:${bindsCount}`);
+        }
+        else { // v is {entity:"xxx",attribute:"xxxxx"}
+          inStatementVariables.push(`"${v.entity}"."${v.attribute}"`);
+        }
+      }
+      let statement = inStatementVariables.join("!=");
+      return [statement,binds];
+    }
+  },
+  "LIKE": {
+    isValid: (fn) => {
+      if (fn.filters === undefined
+          typeof fn.variables === "array"
+          && fn.variables.length === 2
+          ) {
+        return true;
+      }
+      return false;
+    },
+    generateStatement: (fn,bindsCount)=> {
+      let binds = [];
+      let inStatementVariables = [];
+      for (let v of fn.variables) {
+        if (v===null
+            || typeof v === "string"
+            || typeof v === "number"
+            ){
+          binds.push();
+          inStatementVariables.push(`:${bindsCount}`);
+        }
+        else { // v is {entity:"xxx",attribute:"xxxxx"}
+          inStatementVariables.push(`"${v.entity}"."${v.attribute}"`);
+        }
+      }
+      let statement = inStatementVariables.join("LIKE");
+      return [statement,binds];
+    }
+  },
+  "NOT LIKE": {
+    isValid: (fn) => {
+      if (fn.filters === undefined
+          typeof fn.variables === "array"
+          && fn.variables.length === 2
+          ) {
+        return true;
+      }
+      return false;
+    },
+    generateStatement: (fn,bindsCount)=> {
+      let binds = [];
+      let inStatementVariables = [];
+      for (let v of fn.variables) {
+        if (v===null
+            || typeof v === "string"
+            || typeof v === "number"
+            ){
+          binds.push();
+          inStatementVariables.push(`:${bindsCount}`);
+        }
+        else { // v is {entity:"xxx",attribute:"xxxxx"}
+          inStatementVariables.push(`"${v.entity}"."${v.attribute}"`);
+        }
+      }
+      let statement = inStatementVariables.join("NOT LIKE");
+      return [statement,binds];
+    }
+  },
+  "IS": {
+    isValid: (fn) => {
+      if (fn.filters === undefined
+          typeof fn.variables === "array"
+          && fn.variables.length === 2
+          ) {
+        return true;
+      }
+      return false;
+    },
+    generateStatement: (fn,bindsCount)=> {
+      let binds = [];
+      let inStatementVariables = [];
+      for (let v of fn.variables) {
+        if (v===null
+            || typeof v === "string"
+            || typeof v === "number"
+            ){
+          binds.push();
+          inStatementVariables.push(`:${bindsCount}`);
+        }
+        else { // v is {entity:"xxx",attribute:"xxxxx"}
+          inStatementVariables.push(`"${v.entity}"."${v.attribute}"`);
+        }
+      }
+      let statement = inStatementVariables.join("IS");
+      return [statement,binds];
+    }
+  },
+  "IS NOT": {
+    isValid: (fn) => {
+      if (fn.filters === undefined
+          typeof fn.variables === "array"
+          && fn.variables.length === 2
+          ) {
+        return true;
+      }
+      return false;
+    },
+    generateStatement: (fn,bindsCount)=> {
+      let binds = [];
+      let inStatementVariables = [];
+      for (let v of fn.variables) {
+        if (v===null
+            || typeof v === "string"
+            || typeof v === "number"
+            ){
+          binds.push();
+          inStatementVariables.push(`:${bindsCount}`);
+        }
+        else { // v is {entity:"xxx",attribute:"xxxxx"}
+          inStatementVariables.push(`"${v.entity}"."${v.attribute}"`);
+        }
+      }
+      let statement = inStatementVariables.join("IS NOT");
+      return [statement,binds];
+    }
+  },
+  "BETWEEN": {
+    isValid: (fn) => {
+      if (fn.filters === undefined
+          typeof fn.variables === "array"
+          && fn.variables.length === 2
+          ) {
+        return true;
+      }
+      return false;
+    },
+    generateStatement: (fn,bindsCount)=> {
+      let binds = [];
+      let inStatementVariables = [];
+      for (let v of fn.variables) {
+        if (v===null
+            || typeof v === "string"
+            || typeof v === "number"
+            ){
+          binds.push();
+          inStatementVariables.push(`:${bindsCount}`);
+        }
+        else { // v is {entity:"xxx",attribute:"xxxxx"}
+          inStatementVariables.push(`"${v.entity}"."${v.attribute}"`);
+        }
+      }
+      let statement = `${inStatementVariables[0]} BETWEEN ${inStatementVariables[1]} AND ${inStatementVariables[2]}`;
+      return [statement,binds];
+    }
+  },
+  "NOT BETWEEN": {
+    isValid: (fn) => {
+      if (fn.filters === undefined
+          typeof fn.variables === "array"
+          && fn.variables.length === 2
+          ) {
+        return true;
+      }
+      return false;
+    },
+    generateStatement: (fn,bindsCount)=> {
+      let binds = [];
+      let inStatementVariables = [];
+      for (let v of fn.variables) {
+        if (v===null
+            || typeof v === "string"
+            || typeof v === "number"
+            ){
+          binds.push();
+          inStatementVariables.push(`:${bindsCount}`);
+        }
+        else { // v is {entity:"xxx",attribute:"xxxxx"}
+          inStatementVariables.push(`"${v.entity}"."${v.attribute}"`);
+        }
+      }
+      let statement = `${inStatementVariables[0]} NOT BETWEEN ${inStatementVariables[1]} AND ${inStatementVariables[2]}`;
+      return [statement,binds];
+    }
+  },
+  "IN": {
+    isValid: (fn) => {
+      if (fn.filters === undefined
+          typeof fn.variables === "array"
+          && fn.variables.length === 2
+          ) {
+        return true;
+      }
+      return false;
+    },
+    generateStatement: (fn,bindsCount)=> {
+      let binds = [];
+      let inStatementVariables = [];
+      for (let v of fn.variables) {
+        if (v===null
+            || typeof v === "string"
+            || typeof v === "number"
+            ){
+          binds.push();
+          inStatementVariables.push(`:${bindsCount}`);
+        }
+        else { // v is {entity:"xxx",attribute:"xxxxx"}
+          inStatementVariables.push(`"${v.entity}"."${v.attribute}"`);
+        }
+      }
+      let statement = `${inStatementVariables[0]} IN (${ inStatementVariables.slice(1).join(',') })`;
+      return [statement,binds];
+    }
+  },
+  "NOT IN": {
+    isValid: (fn) => {
+      if (fn.filters === undefined
+          typeof fn.variables === "array"
+          && fn.variables.length === 2
+          ) {
+        return true;
+      }
+      return false;
+    },
+    generateStatement: (fn,bindsCount)=> {
+      let binds = [];
+      let inStatementVariables = [];
+      for (let v of fn.variables) {
+        if (v===null
+            || typeof v === "string"
+            || typeof v === "number"
+            ){
+          binds.push();
+          inStatementVariables.push(`:${bindsCount}`);
+        }
+        else { // v is {entity:"xxx",attribute:"xxxxx"}
+          inStatementVariables.push(`"${v.entity}"."${v.attribute}"`);
+        }
+      }
+      let statement = `${inStatementVariables[0]} NOT IN (${ inStatementVariables.slice(1).join(',') })`;
+      return [statement,binds];
+    }
+  },
 }
 
 module.exports = SqlBuilder;
