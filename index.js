@@ -255,7 +255,8 @@ class SqlBuilder {
   }
 
   _getFilterVariables(queryFilter) {
-    if (queryFilter === null) {
+    if (queryFilter === undefined
+        || queryFilter === null) {
       return [];
     }
     let dfsStack = [queryFilter];
@@ -338,13 +339,13 @@ class SqlBuilder {
   }
 
   _generateWhereStatement(entity,query) {
-    if (!("filter" in query)
-        || query.filter === null
+    let queryFilter = query.filter;
+    if (queryFilter === undefined
+        || queryFilter === null
         ) {
       return ["",[]];
     }
     let {schema} = this;
-    let queryFilter = query.filter;
     let entities = this._getFilterEntities(queryFilter);
     let joinStatement = this._generateJoinStatement(entity,entities);
     let [filterStatement,binds] = this._generateFilterStatement(queryFilter);
@@ -495,7 +496,7 @@ SqlBuilder.FILTER_OPERATOR = {
     },
     generateStatement: (fn)=> {
       let {filters} = fn;
-      let statement = "NOT "+fn.filters[0].statement;
+      let statement = "NOT "+'('+fn.filters[0].statement+')';
       let binds = fn.filters[0].binds;
       return [statement,binds];
     }
@@ -512,7 +513,7 @@ SqlBuilder.FILTER_OPERATOR = {
     },
     generateStatement: (fn)=> {
       let {filters} = fn;
-      let statement = fn.filters.map( n=>n.statement ).join(" AND ");
+      let statement = fn.filters.map( n=>'('+n.statement+')' ).join(" AND ");
       let binds = [].concat(...fn.filters.map( n=>n.binds ));
       return [statement,binds];
     }
@@ -528,7 +529,7 @@ SqlBuilder.FILTER_OPERATOR = {
       return false;
     },
     generateStatement: (fn)=> {
-      let statement = fn.filters.map( n=>n.statement ).join(" OR ");
+      let statement = fn.filters.map( n=>'('+n.statement+')' ).join(" OR ");
       let binds = [].concat(...fn.filters.map( n=>n.binds ));
       return [statement,binds];
     }
@@ -827,7 +828,7 @@ SqlBuilder.FILTER_OPERATOR = {
     isValid: (fn) => {
       if (fn.filters === undefined
           && Array.isArray(fn.variables)
-          && fn.variables.length === 2
+          && fn.variables.length === 3
           ) {
         return true;
       }
@@ -856,7 +857,7 @@ SqlBuilder.FILTER_OPERATOR = {
     isValid: (fn) => {
       if (fn.filters === undefined
           && Array.isArray(fn.variables)
-          && fn.variables.length === 2
+          && fn.variables.length === 3
           ) {
         return true;
       }
@@ -885,7 +886,7 @@ SqlBuilder.FILTER_OPERATOR = {
     isValid: (fn) => {
       if (fn.filters === undefined
           && Array.isArray(fn.variables)
-          && fn.variables.length === 2
+          && fn.variables.length >= 2
           ) {
         return true;
       }
@@ -914,7 +915,7 @@ SqlBuilder.FILTER_OPERATOR = {
     isValid: (fn) => {
       if (fn.filters === undefined
           && Array.isArray(fn.variables)
-          && fn.variables.length === 2
+          && fn.variables.length >= 2
           ) {
         return true;
       }
