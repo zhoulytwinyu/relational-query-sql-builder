@@ -57,6 +57,7 @@ class SqlBuilder {
   
   // Helper functions
   _isValidSchema(schema){ // should be converted to static method
+    // Can be converted to undirected graph
     let g = null;
     try {
       g = this._getUndirectedGraph(schema);
@@ -66,9 +67,61 @@ class SqlBuilder {
           return false;
       }
     }
-    let acyclicity = this._isConnectedUndirectedAcyclicGraph(g);
-    if (! acyclicity) {
+    // Acyclicity
+    if (! this._isConnectedUndirectedAcyclicGraph(g)) {
       return false;
+    }
+    // Check 'id' and 'references' fields
+    for (let subschema of Object.values(schema) ) {
+      if (! this._isValidId(subschema.id)
+          || ! this._idValidReferences(subschema.references)
+          ) {
+        return false;
+      }
+    }
+    return true;
+  }
+  
+  _isValidId(id){
+    console.log(id);
+    if ( !Array.isArray(id) ){
+      return false;
+    }
+    for (let i of id) {
+      if (typeof i !== "string") {
+        return false;
+      }
+    }
+    return true;
+  }
+  
+  _idValidReferences(references) {
+    console.log(references);
+    if (references === undefined ) {
+      return true;
+    }
+    if (typeof references !== "object" ) {
+      return false;
+    }
+    for (let refs of Object.values(references) ) {
+      if (!Array.isArray(refs)
+          || refs.length!==2
+          || !Array.isArray(refs[0])
+          || !Array.isArray(refs[1])
+          || refs[0].length !== refs[1].length
+          ){
+        return false;
+      }
+      for (let i of refs[0]) {
+        if (typeof i !== "string") {
+          return false;
+        }
+      }
+      for (let i of refs[1]) {
+        if (typeof i !== "string") {
+          return false;
+        }
+      }
     }
     return true;
   }
@@ -344,12 +397,15 @@ class SqlBuilder {
       return ["",[]];
     }
     let {schema} = this;
+    let idString = schema[entity].id
+      .map( i=>`"${entity}"."${i}"` )
+      .join(',');
     let queryFilter = query.filter;
     let entities = this._getFilterEntities(queryFilter);
     let joinStatement = this._generateJoinStatement(entity,entities);
     let [filterStatement,binds] = this._generateFilterStatement(queryFilter);
     return [
-      `WHERE "${entity}"."__ID__" IN (SELECT "${entity}"."__ID__" FROM ${joinStatement} WHERE ${filterStatement})`,
+      `WHERE (${idString}) IN (SELECT ${idString} FROM ${joinStatement} WHERE ${filterStatement})`,
       binds
     ];
   }
@@ -426,14 +482,26 @@ class SqlBuilder {
     let {schema} = this;
     let joinOnStatement = null;
     // Either entity1 references entity2
-    if ("references" in schema[entity1] &&
-        entity2 in schema[entity1].references) {
-      joinOnStatement = `"${entity1}"."__REF__${entity2}"="${entity2}"."__ID__"`;
+    if ("references" in schema[entity1]
+        && entity2 in schema[entity1].references) {
+      let statements = [];
+      let e1Attrs = schema[entity1].references[entity2][0];
+      let e2Attrs = schema[entity1].references[entity2][1];
+      for (let i=0; i<e1Attrs.length; i++){
+        statements.push(`"${entity1}"."${e1Attrs[i]}"="${entity2}"."${e2Attrs[i]}"`);
+      }
+      joinOnStatement = statements.join(" AND ");
     }
     // Or entity2 references entity1
-    else if ("references" in schema[entity2] &&
-        entity1 in schema[entity2].references) {
-      joinOnStatement = `"${entity1}"."__ID__"="${entity2}"."__REF__${entity1}"`;
+    else if ("references" in schema[entity2]
+        && entity1 in schema[entity2].references) {
+      let statements = [];
+      let e1Attrs = schema[entity2].references[entity1][1];
+      let e2Attrs = schema[entity2].references[entity1][0];
+      for (let i=0; i<e1Attrs.length; i++){
+        statements.push(`"${entity1}"."${e1Attrs[i]}"="${entity2}"."${e2Attrs[i]}"`);
+      }
+      joinOnStatement = statements.join(" AND ");
     }
     else {
       throw new Error("Not adjacent entities");
