@@ -83,7 +83,6 @@ class SqlBuilder {
   }
   
   _isValidId(id){
-    console.log(id);
     if ( !Array.isArray(id) ){
       return false;
     }
@@ -96,7 +95,6 @@ class SqlBuilder {
   }
   
   _idValidReferences(references) {
-    console.log(references);
     if (references === undefined ) {
       return true;
     }
@@ -402,7 +400,6 @@ class SqlBuilder {
     let idString = schema[entity].id
       .map( i=>`"${entity}"."${i}"` )
       .join(',');
-    let queryFilter = query.filter;
     let entities = this._getFilterEntities(queryFilter);
     let joinStatement = this._generateJoinStatement(entity,entities);
     let [filterStatement,binds] = this._generateFilterStatement(queryFilter);
