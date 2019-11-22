@@ -209,6 +209,7 @@ class SqlBuilder {
     }
     if (this._isValidQuerySelect(query.select)
         && this._isValidQueryFilter(query.filter)
+        && this._isValidQueryIgnore(query.ignore)
         ) {
       return true;
     }
@@ -324,6 +325,33 @@ class SqlBuilder {
     return ret;
   }
   
+  _isValidQueryIgnore(queryIgnore){
+    let {schema} = this;
+    if (queryIgnore === undefined
+        || queryIgnore === null) {
+      return true;
+    }
+    if (typeof queryIgnore !== "object") {
+      return false;
+    }
+    for (let entity of Object.keys(queryIgnore)) {
+      if (!(entity in schema)
+          || !Array.isArray(queryIgnore[entity])
+          ) {
+        return false;
+      }
+      for (let id of queryIgnore[entity]) {
+        if (typeof id !== "string"
+            && typeof id !== "number"
+            ) {
+      console.log(3);
+          return false;
+        }
+      }
+    }
+    return true;
+  }
+  
   _getFilterEntities(queryFilter) {
     let ret = [];
     for (let v of this._getFilterVariables(queryFilter)) {
@@ -391,6 +419,7 @@ class SqlBuilder {
 
   _generateWhereStatement(entity,query) {
     let queryFilter = query.filter;
+    let queryIgnore = query.ignore;
     if (queryFilter === undefined
         || queryFilter === null
         ) {
@@ -402,11 +431,36 @@ class SqlBuilder {
       .join(',');
     let entities = this._getFilterEntities(queryFilter);
     let joinStatement = this._generateJoinStatement(entity,entities);
-    let [filterStatement,binds] = this._generateFilterStatement(queryFilter);
-    return [
-      `WHERE (${idString}) IN (SELECT ${idString} FROM ${joinStatement} WHERE ${filterStatement})`,
-      binds
-    ];
+    let [filterStatement,binds1] = this._generateFilterStatement(queryFilter,[]);
+    if (queryIgnore !== undefined
+        && queryIgnore !== null
+        && entity in queryIgnore
+        && queryIgnore[entity].length > 0
+        ) {
+      let [ignoreStatement,binds2] = this._generateIgnoreStatement(entity,queryIgnore,binds1);
+      return [
+        `
+        WHERE (${idString}) IN (
+          SELECT ${idString}
+          FROM ${joinStatement} 
+          WHERE (${filterStatement})
+            AND (${ignoreStatement})
+        )
+        `,
+        binds2
+      ];
+    } else {
+      return [
+        `
+        WHERE (${idString}) IN (
+          SELECT ${idString}
+          FROM ${joinStatement} 
+          WHERE ${filterStatement}
+        )
+        `,
+        binds1
+      ];
+    }
   }
 
   _generateJoinStatement(entity1,entities) {
@@ -508,7 +562,7 @@ class SqlBuilder {
     return joinOnStatement;
   }
 
-  _generateFilterStatement(filterNode) {
+  _generateFilterStatement(filterNode,binds) {
     // Deep copy filter node
     // because I don't want to modify input. Being pure.
     let filterNodeCopy = {...filterNode};
@@ -535,17 +589,36 @@ class SqlBuilder {
       }
     }
     // Work out the result
-    let bindsCount = 1;
+    let bindsCount = 1+binds.length;
     while (preOrderStack.length !== 0) {
       let fn = preOrderStack.pop();
-      let [statement,binds] = this.constructor.FILTER_OPERATOR[fn.op].generateStatement(fn,bindsCount);
-      fn.statement = statement;
-      fn.binds = binds;
-      bindsCount += binds.length;
+      let [st,bd] = this.constructor.FILTER_OPERATOR[fn.op].generateStatement(fn,bindsCount);
+      fn.statement = st;
+      fn.binds = bd;
+      bindsCount += bd.length;
     }
     let statement = filterNodeCopy.statement;
-    let binds = filterNodeCopy.binds;
-    return [statement,binds];
+    let newBinds = [...binds,...filterNodeCopy.binds];
+    return [statement,newBinds];
+  }
+  
+  _generateIgnoreStatement(entity,queryIgnore,binds) {
+    let ids = queryIgnore[entity];
+    let statements = [];
+    for (let i=0,j=1000; i<ids.length; i+=1000,j+=1000) {
+      let placeHolders = [];
+      let maxK=Math.min(j,ids.length)
+      for (let k=i, b=binds.length+1+i;
+          k<maxK;
+          k++,b++
+          ) {
+        placeHolders.push(`:${b}`);
+      }
+      statements.push(`"${entity}"."__ID__" NOT IN (${placeHolders.join(',')})`);
+    }
+    let statement = statements.join(" AND ");
+    let newBinds = [...binds,...ids];
+    return [statement,newBinds];
   }
 }
 
@@ -1007,5 +1080,7 @@ SqlBuilder.FILTER_OPERATOR = {
     }
   },
 }
+
+
 
 module.exports = SqlBuilder;
