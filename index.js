@@ -40,7 +40,6 @@ class SqlBuilder {
     // setup memoization
     this._getUndirectedGraph = memoize_one( this._getUndirectedGraph.bind(this) );
     this._getFilterEntities = memoize_one( this._getFilterEntities.bind(this) );
-    this._generateFilterStatement = memoize_one( this._generateFilterStatement.bind(this) );
   }
   
   buildSQL(query) {
@@ -64,11 +63,13 @@ class SqlBuilder {
     } catch (error) {
       switch (error.name) {
         case "SyntaxError":
+          console.warn("Schema is not undirected graph.");
           return false;
       }
     }
     // Acyclicity
     if (! this._isConnectedUndirectedAcyclicGraph(g)) {
+      console.warn("Schema is cyclic/");
       return false;
     }
     // Check 'id' and 'references' fields
@@ -76,6 +77,7 @@ class SqlBuilder {
       if (! this._isValidId(subschema.id)
           || ! this._idValidReferences(subschema.references)
           ) {
+        console.warn("Schema fields are not valid.");
         return false;
       }
     }
@@ -123,7 +125,7 @@ class SqlBuilder {
     }
     return true;
   }
-
+  
   _getUndirectedGraph(schema) { // should be converted to static method
     let g = this._getGraph(schema);
     let ug = {};
@@ -141,7 +143,7 @@ class SqlBuilder {
     }
     return ug;
   }
-
+  
   _getGraph(schema){ // should be converted to static method
     let g = {};
     for (let n of Object.keys(schema)) {
@@ -158,7 +160,7 @@ class SqlBuilder {
     }
     return g;
   }
-
+  
   _isConnectedUndirectedAcyclicGraph(graph) { // should be converted to static method
     if (Object.keys(graph).length<=1) {
       return true;
@@ -236,7 +238,7 @@ class SqlBuilder {
     }
     return true;
   }
-
+  
   _isValidQueryFilter(queryFilter) {
     if (queryFilter === undefined 
         || queryFilter === null
@@ -280,7 +282,7 @@ class SqlBuilder {
     }
     return false;
   }
-
+  
   _isValidFilterVariable(filterVariable) {
     if (filterVariable === null
         || typeof filterVariable === "string"
@@ -305,25 +307,6 @@ class SqlBuilder {
     }
     return false;
   }
-
-  _getFilterVariables(queryFilter) {
-    if (queryFilter === undefined
-        || queryFilter === null) {
-      return [];
-    }
-    let dfsStack = [queryFilter];
-    let ret = [];
-    while (dfsStack.length !== 0){
-      let fNode = dfsStack.pop();
-      if ("filters" in fNode) {
-        dfsStack.push(...fNode.filters);
-      }
-      if ("variables" in fNode){
-        ret.push(...fNode.variables);
-      }
-    }
-    return ret;
-  }
   
   _isValidQueryIgnore(queryIgnore){
     let {schema} = this;
@@ -344,12 +327,30 @@ class SqlBuilder {
         if (typeof id !== "string"
             && typeof id !== "number"
             ) {
-      console.log(3);
           return false;
         }
       }
     }
     return true;
+  }
+  
+  _getFilterVariables(queryFilter) {
+    if (queryFilter === undefined
+        || queryFilter === null) {
+      return [];
+    }
+    let dfsStack = [queryFilter];
+    let ret = [];
+    while (dfsStack.length !== 0){
+      let fNode = dfsStack.pop();
+      if ("filters" in fNode) {
+        dfsStack.push(...fNode.filters);
+      }
+      if ("variables" in fNode){
+        ret.push(...fNode.variables);
+      }
+    }
+    return ret;
   }
   
   _getFilterEntities(queryFilter) {
@@ -370,11 +371,14 @@ class SqlBuilder {
     let fromStatement = this._generateFromStatement(entity,query);
     let [whereStatement,binds] = this._generateWhereStatement(entity,query);
     return [
-      `${cteStatement} ${selectStatement} ${fromStatement} ${whereStatement}`,
+      `${cteStatement} \n`+
+      `${selectStatement} \n`+
+      `${fromStatement} \n`+
+      `${whereStatement}`,
       binds
     ];
   }
-
+  
   _generateCTEStatement(entity,query) {
     let {schema} = this;
     let querySelect = query.select;
@@ -392,9 +396,9 @@ class SqlBuilder {
     for ( let e of Object.keys(includeCTE) ) {
       statements.push(schema[e].cte);
     }
-    return "WITH "+statements.join(',');
+    return "WITH "+statements.join(',\n');
   }
-
+  
   _generateSelectStatement(entity,query) {
     let {schema} = this;
     let querySelect = query.select;
@@ -408,71 +412,139 @@ class SqlBuilder {
       }
     }
     let statement = Object.keys(queryAttrs)
-      .map( (attr)=>`"${entity}"."${attr}"` )
+      .map( (attr)=>`"__${entity}"."${attr}"` )
       .join( ',' );
     return `SELECT ${statement}`;
   }
   
   _generateFromStatement(entity,query) {
-    return `FROM "${entity}"`;
+    return `FROM "__${entity}"`;
   }
-
+  
   _generateWhereStatement(entity,query) {
     let queryFilter = query.filter;
     let queryIgnore = query.ignore;
-    if (queryFilter === undefined
-        || queryFilter === null
-        ) {
-      return ["",[]];
-    }
-    let {schema} = this;
-    let idString = schema[entity].id
-      .map( i=>`"${entity}"."${i}"` )
-      .join(',');
-    let entities = this._getFilterEntities(queryFilter);
-    let joinStatement = this._generateJoinStatement(entity,entities);
-    let [filterStatement,binds1] = this._generateFilterStatement(queryFilter,[]);
-    if (queryIgnore !== undefined
-        && queryIgnore !== null
-        && entity in queryIgnore
-        && queryIgnore[entity].length > 0
-        ) {
-      let [ignoreStatement,binds2] = this._generateIgnoreStatement(entity,queryIgnore,binds1);
+    let binds = [];
+    let [filterStatement,binds1] = this._generateFilterStatement(entity,queryFilter,binds);
+    let [ignoreStatement,binds2] = this._generateIgnoreStatement(entity,queryIgnore,binds1);
+    if (filterStatement === null
+        && ignoreStatement === null) {
       return [
-        `
-        WHERE (${idString}) IN (
-          SELECT ${idString}
-          FROM ${joinStatement} 
-          WHERE (${filterStatement})
-            AND (${ignoreStatement})
-        )
-        `,
+        '',
+        binds2
+      ];
+    } else if (ignoreStatement === null) {
+      return [
+        `WHERE ${filterStatement}`,
+        binds2
+      ];
+    } else if (filterStatement === null) {
+      return [
+        `WHERE ${ignoreStatement}`,
         binds2
       ];
     } else {
       return [
-        `
-        WHERE (${idString}) IN (
-          SELECT ${idString}
-          FROM ${joinStatement} 
-          WHERE ${filterStatement}
-        )
-        `,
-        binds1
+        `WHERE ( ${filterStatement} ) \n`+
+        `  AND ( ${ignoreStatement} )`,
+        binds2
       ];
     }
   }
-
+  
+  _generateFilterStatement(entity,queryFilter,binds) {
+    if (queryFilter === undefined
+        || queryFilter === null
+        ){
+      return [null,[...binds]];
+    }
+    let {schema} = this;
+    let statement = null;
+    let idString = schema[entity].id
+      .map( i=>`"__${entity}"."${i}"` )
+      .join(',');
+    let entities = this._getFilterEntities(queryFilter);
+    let joinStatement = this._generateJoinStatement(entity,entities);
+    let subFilterStatement = null;
+    // Beflow, we use DFS to prepare subFilterStatement and binds
+    // Deep copy filter node
+    // because I don't want to modify input. Being pure.
+    let filterNodeCopy = {...queryFilter};
+    let dfsStack = [filterNodeCopy];
+    while (dfsStack.length !== 0) {
+      let fn = dfsStack.pop();
+      if ("filters" in fn) {
+        fn.filters = fn.filters.map( n=>({...n}) );
+        for (let n of fn.filters) {
+          dfsStack.push(n);
+        }
+      }
+    }
+    // Prepare pre-order stack
+    let preOrderStack = [];
+    dfsStack = [filterNodeCopy];
+    while (dfsStack.length !== 0) {
+      let fn = dfsStack.pop();
+      preOrderStack.push(fn);
+      if ("filters" in fn){
+        for (let n of fn.filters) {
+          dfsStack.push(n);
+        }
+      }
+    }
+    // Work out the result
+    while (preOrderStack.length !== 0) {
+      let fn = preOrderStack.pop();
+      let [st,bd] = this.constructor.FILTER_OPERATOR[fn.op].generateStatement(fn);
+      fn.statement = st;
+      fn.binds = bd;
+    }
+    subFilterStatement = filterNodeCopy.statement;
+    let newBinds = [...binds,...filterNodeCopy.binds];
+    statement = `(${idString}) IN ( \n`+
+      `  SELECT ${idString} \n`+
+      `  FROM ${joinStatement} \n`+ 
+      `  WHERE ${subFilterStatement} \n`+
+      ')';
+    return [statement,newBinds];
+  }
+  
+  _generateIgnoreStatement(entity,queryIgnore,binds) {
+    if (queryIgnore===undefined
+        || queryIgnore===null
+        || !(entity in queryIgnore)
+        || queryIgnore[entity].length === 0
+        ){
+      return [null,[...binds]]
+    }
+    let ids = queryIgnore[entity];
+    let statements = [];
+    for (let i=0,j=1000; i<ids.length; i+=1000,j+=1000) {
+      let placeHolders = [];
+      let maxK=Math.min(j,ids.length)
+      for (let k=i, b=binds.length+1+i;
+          k<maxK;
+          k++,b++
+          ) {
+        placeHolders.push("?");
+      }
+      statements.push(`"__${entity}"."__ID__" NOT IN (${placeHolders.join(',')})`);
+    }
+    let statement = statements.join(" AND ");
+    let newBinds = [...binds,...ids];
+    return [statement,newBinds];
+  }
+  
   _generateJoinStatement(entity1,entities) {
     // Assuming entities joinable
     let {schema} = this;
-    let joinStatement = [entity1];
+    let joinStatement = [`__${entity1}`];
     let joinOrder = this._resolveJoinOrder(entity1,entities);
     for (let joinPath of joinOrder){ 
       for (let i=0,j=1; j<joinPath.length; i++,j++) {
         let e1 = joinPath[i];
         let e2 = joinPath[j];
-        let s = `JOIN "${e2}" ON `+this._generateAdjacentJoinOnStatement(e1,e2);
+        let s = `JOIN "__${e2}" ON `+this._generateAdjacentJoinOnStatement(e1,e2);
         joinStatement.push(s);
       }
     }
@@ -541,7 +613,7 @@ class SqlBuilder {
       let e1Attrs = schema[entity1].references[entity2][0];
       let e2Attrs = schema[entity1].references[entity2][1];
       for (let i=0; i<e1Attrs.length; i++){
-        statements.push(`"${entity1}"."${e1Attrs[i]}"="${entity2}"."${e2Attrs[i]}"`);
+        statements.push(`"__${entity1}"."${e1Attrs[i]}"="__${entity2}"."${e2Attrs[i]}"`);
       }
       joinOnStatement = statements.join(" AND ");
     }
@@ -552,7 +624,7 @@ class SqlBuilder {
       let e1Attrs = schema[entity2].references[entity1][1];
       let e2Attrs = schema[entity2].references[entity1][0];
       for (let i=0; i<e1Attrs.length; i++){
-        statements.push(`"${entity1}"."${e1Attrs[i]}"="${entity2}"."${e2Attrs[i]}"`);
+        statements.push(`"__${entity1}"."${e1Attrs[i]}"="__${entity2}"."${e2Attrs[i]}"`);
       }
       joinOnStatement = statements.join(" AND ");
     }
@@ -560,65 +632,6 @@ class SqlBuilder {
       throw new Error("Not adjacent entities");
     }
     return joinOnStatement;
-  }
-
-  _generateFilterStatement(filterNode,binds) {
-    // Deep copy filter node
-    // because I don't want to modify input. Being pure.
-    let filterNodeCopy = {...filterNode};
-    let dfsStack = [filterNodeCopy];
-    while (dfsStack.length !== 0) {
-      let fn = dfsStack.pop();
-      if ("filters" in fn) {
-        fn.filters = fn.filters.map( n=>({...n}) );
-        for (let n of fn.filters) {
-          dfsStack.push(n);
-        }
-      }
-    }
-    // Prepare pre-order stack
-    let preOrderStack = [];
-    dfsStack = [filterNodeCopy];
-    while (dfsStack.length !== 0) {
-      let fn = dfsStack.pop();
-      preOrderStack.push(fn);
-      if ("filters" in fn){
-        for (let n of fn.filters) {
-          dfsStack.push(n);
-        }
-      }
-    }
-    // Work out the result
-    let bindsCount = 1+binds.length;
-    while (preOrderStack.length !== 0) {
-      let fn = preOrderStack.pop();
-      let [st,bd] = this.constructor.FILTER_OPERATOR[fn.op].generateStatement(fn,bindsCount);
-      fn.statement = st;
-      fn.binds = bd;
-      bindsCount += bd.length;
-    }
-    let statement = filterNodeCopy.statement;
-    let newBinds = [...binds,...filterNodeCopy.binds];
-    return [statement,newBinds];
-  }
-  
-  _generateIgnoreStatement(entity,queryIgnore,binds) {
-    let ids = queryIgnore[entity];
-    let statements = [];
-    for (let i=0,j=1000; i<ids.length; i+=1000,j+=1000) {
-      let placeHolders = [];
-      let maxK=Math.min(j,ids.length)
-      for (let k=i, b=binds.length+1+i;
-          k<maxK;
-          k++,b++
-          ) {
-        placeHolders.push(`:${b}`);
-      }
-      statements.push(`"${entity}"."__ID__" NOT IN (${placeHolders.join(',')})`);
-    }
-    let statement = statements.join(" AND ");
-    let newBinds = [...binds,...ids];
-    return [statement,newBinds];
   }
 }
 
@@ -683,7 +696,7 @@ SqlBuilder.FILTER_OPERATOR = {
       }
       return false;
     },
-    generateStatement: (fn,bindsCount)=> {
+    generateStatement: (fn)=> {
       let binds = [];
       let inStatementVariables = [];
       for (let v of fn.variables) {
@@ -692,10 +705,10 @@ SqlBuilder.FILTER_OPERATOR = {
             || typeof v === "number"
             ){
           binds.push(v);
-          inStatementVariables.push(`:${bindsCount}`);
+          inStatementVariables.push('?');
         }
         else { // v is {entity:"xxx",attribute:"xxxxx"}
-          inStatementVariables.push(`"${v.entity}"."${v.attribute}"`);
+          inStatementVariables.push(`"__${v.entity}"."${v.attribute}"`);
         }
       }
       let statement = inStatementVariables.join("=");
@@ -712,7 +725,7 @@ SqlBuilder.FILTER_OPERATOR = {
       }
       return false;
     },
-    generateStatement: (fn,bindsCount)=> {
+    generateStatement: (fn)=> {
       let binds = [];
       let inStatementVariables = [];
       for (let v of fn.variables) {
@@ -721,10 +734,10 @@ SqlBuilder.FILTER_OPERATOR = {
             || typeof v === "number"
             ){
           binds.push(v);
-          inStatementVariables.push(`:${bindsCount}`);
+          inStatementVariables.push('?');
         }
         else { // v is {entity:"xxx",attribute:"xxxxx"}
-          inStatementVariables.push(`"${v.entity}"."${v.attribute}"`);
+          inStatementVariables.push(`"__${v.entity}"."${v.attribute}"`);
         }
       }
       let statement = inStatementVariables.join("<");
@@ -741,7 +754,7 @@ SqlBuilder.FILTER_OPERATOR = {
       }
       return false;
     },
-    generateStatement: (fn,bindsCount)=> {
+    generateStatement: (fn)=> {
       let binds = [];
       let inStatementVariables = [];
       for (let v of fn.variables) {
@@ -750,10 +763,10 @@ SqlBuilder.FILTER_OPERATOR = {
             || typeof v === "number"
             ){
           binds.push(v);
-          inStatementVariables.push(`:${bindsCount}`);
+          inStatementVariables.push('?');
         }
         else { // v is {entity:"xxx",attribute:"xxxxx"}
-          inStatementVariables.push(`"${v.entity}"."${v.attribute}"`);
+          inStatementVariables.push(`"__${v.entity}"."${v.attribute}"`);
         }
       }
       let statement = inStatementVariables.join(">");
@@ -770,7 +783,7 @@ SqlBuilder.FILTER_OPERATOR = {
       }
       return false;
     },
-    generateStatement: (fn,bindsCount)=> {
+    generateStatement: (fn)=> {
       let binds = [];
       let inStatementVariables = [];
       for (let v of fn.variables) {
@@ -779,10 +792,10 @@ SqlBuilder.FILTER_OPERATOR = {
             || typeof v === "number"
             ){
           binds.push(v);
-          inStatementVariables.push(`:${bindsCount}`);
+          inStatementVariables.push('?');
         }
         else { // v is {entity:"xxx",attribute:"xxxxx"}
-          inStatementVariables.push(`"${v.entity}"."${v.attribute}"`);
+          inStatementVariables.push(`"__${v.entity}"."${v.attribute}"`);
         }
       }
       let statement = inStatementVariables.join("<=");
@@ -799,7 +812,7 @@ SqlBuilder.FILTER_OPERATOR = {
       }
       return false;
     },
-    generateStatement: (fn,bindsCount)=> {
+    generateStatement: (fn)=> {
       let binds = [];
       let inStatementVariables = [];
       for (let v of fn.variables) {
@@ -808,10 +821,10 @@ SqlBuilder.FILTER_OPERATOR = {
             || typeof v === "number"
             ){
           binds.push(v);
-          inStatementVariables.push(`:${bindsCount}`);
+          inStatementVariables.push('?');
         }
         else { // v is {entity:"xxx",attribute:"xxxxx"}
-          inStatementVariables.push(`"${v.entity}"."${v.attribute}"`);
+          inStatementVariables.push(`"__${v.entity}"."${v.attribute}"`);
         }
       }
       let statement = inStatementVariables.join(">=");
@@ -828,7 +841,7 @@ SqlBuilder.FILTER_OPERATOR = {
       }
       return false;
     },
-    generateStatement: (fn,bindsCount)=> {
+    generateStatement: (fn)=> {
       let binds = [];
       let inStatementVariables = [];
       for (let v of fn.variables) {
@@ -837,10 +850,10 @@ SqlBuilder.FILTER_OPERATOR = {
             || typeof v === "number"
             ){
           binds.push(v);
-          inStatementVariables.push(`:${bindsCount}`);
+          inStatementVariables.push('?');
         }
         else { // v is {entity:"xxx",attribute:"xxxxx"}
-          inStatementVariables.push(`"${v.entity}"."${v.attribute}"`);
+          inStatementVariables.push(`"__${v.entity}"."${v.attribute}"`);
         }
       }
       let statement = inStatementVariables.join("!=");
@@ -857,7 +870,7 @@ SqlBuilder.FILTER_OPERATOR = {
       }
       return false;
     },
-    generateStatement: (fn,bindsCount)=> {
+    generateStatement: (fn)=> {
       let binds = [];
       let inStatementVariables = [];
       for (let v of fn.variables) {
@@ -866,10 +879,10 @@ SqlBuilder.FILTER_OPERATOR = {
             || typeof v === "number"
             ){
           binds.push(v);
-          inStatementVariables.push(`:${bindsCount}`);
+          inStatementVariables.push('?');
         }
         else { // v is {entity:"xxx",attribute:"xxxxx"}
-          inStatementVariables.push(`"${v.entity}"."${v.attribute}"`);
+          inStatementVariables.push(`"__${v.entity}"."${v.attribute}"`);
         }
       }
       let statement = inStatementVariables.join("LIKE");
@@ -886,7 +899,7 @@ SqlBuilder.FILTER_OPERATOR = {
       }
       return false;
     },
-    generateStatement: (fn,bindsCount)=> {
+    generateStatement: (fn)=> {
       let binds = [];
       let inStatementVariables = [];
       for (let v of fn.variables) {
@@ -895,10 +908,10 @@ SqlBuilder.FILTER_OPERATOR = {
             || typeof v === "number"
             ){
           binds.push(v);
-          inStatementVariables.push(`:${bindsCount}`);
+          inStatementVariables.push('?');
         }
         else { // v is {entity:"xxx",attribute:"xxxxx"}
-          inStatementVariables.push(`"${v.entity}"."${v.attribute}"`);
+          inStatementVariables.push(`"__${v.entity}"."${v.attribute}"`);
         }
       }
       let statement = inStatementVariables.join("NOT LIKE");
@@ -915,7 +928,7 @@ SqlBuilder.FILTER_OPERATOR = {
       }
       return false;
     },
-    generateStatement: (fn,bindsCount)=> {
+    generateStatement: (fn)=> {
       let binds = [];
       let inStatementVariables = [];
       for (let v of fn.variables) {
@@ -924,10 +937,10 @@ SqlBuilder.FILTER_OPERATOR = {
             || typeof v === "number"
             ){
           binds.push(v);
-          inStatementVariables.push(`:${bindsCount}`);
+          inStatementVariables.push('?');
         }
         else { // v is {entity:"xxx",attribute:"xxxxx"}
-          inStatementVariables.push(`"${v.entity}"."${v.attribute}"`);
+          inStatementVariables.push(`"__${v.entity}"."${v.attribute}"`);
         }
       }
       let statement = inStatementVariables.join("IS");
@@ -944,7 +957,7 @@ SqlBuilder.FILTER_OPERATOR = {
       }
       return false;
     },
-    generateStatement: (fn,bindsCount)=> {
+    generateStatement: (fn)=> {
       let binds = [];
       let inStatementVariables = [];
       for (let v of fn.variables) {
@@ -953,10 +966,10 @@ SqlBuilder.FILTER_OPERATOR = {
             || typeof v === "number"
             ){
           binds.push(v);
-          inStatementVariables.push(`:${bindsCount}`);
+          inStatementVariables.push('?');
         }
         else { // v is {entity:"xxx",attribute:"xxxxx"}
-          inStatementVariables.push(`"${v.entity}"."${v.attribute}"`);
+          inStatementVariables.push(`"__${v.entity}"."${v.attribute}"`);
         }
       }
       let statement = inStatementVariables.join("IS NOT");
@@ -973,7 +986,7 @@ SqlBuilder.FILTER_OPERATOR = {
       }
       return false;
     },
-    generateStatement: (fn,bindsCount)=> {
+    generateStatement: (fn)=> {
       let binds = [];
       let inStatementVariables = [];
       for (let v of fn.variables) {
@@ -982,10 +995,10 @@ SqlBuilder.FILTER_OPERATOR = {
             || typeof v === "number"
             ){
           binds.push(v);
-          inStatementVariables.push(`:${bindsCount}`);
+          inStatementVariables.push('?');
         }
         else { // v is {entity:"xxx",attribute:"xxxxx"}
-          inStatementVariables.push(`"${v.entity}"."${v.attribute}"`);
+          inStatementVariables.push(`"__${v.entity}"."${v.attribute}"`);
         }
       }
       let statement = `${inStatementVariables[0]} BETWEEN ${inStatementVariables[1]} AND ${inStatementVariables[2]}`;
@@ -1002,7 +1015,7 @@ SqlBuilder.FILTER_OPERATOR = {
       }
       return false;
     },
-    generateStatement: (fn,bindsCount)=> {
+    generateStatement: (fn)=> {
       let binds = [];
       let inStatementVariables = [];
       for (let v of fn.variables) {
@@ -1011,10 +1024,10 @@ SqlBuilder.FILTER_OPERATOR = {
             || typeof v === "number"
             ){
           binds.push(v);
-          inStatementVariables.push(`:${bindsCount}`);
+          inStatementVariables.push('?');
         }
         else { // v is {entity:"xxx",attribute:"xxxxx"}
-          inStatementVariables.push(`"${v.entity}"."${v.attribute}"`);
+          inStatementVariables.push(`"__${v.entity}"."${v.attribute}"`);
         }
       }
       let statement = `${inStatementVariables[0]} NOT BETWEEN ${inStatementVariables[1]} AND ${inStatementVariables[2]}`;
@@ -1031,7 +1044,7 @@ SqlBuilder.FILTER_OPERATOR = {
       }
       return false;
     },
-    generateStatement: (fn,bindsCount)=> {
+    generateStatement: (fn)=> {
       let binds = [];
       let inStatementVariables = [];
       for (let v of fn.variables) {
@@ -1040,10 +1053,10 @@ SqlBuilder.FILTER_OPERATOR = {
             || typeof v === "number"
             ){
           binds.push(v);
-          inStatementVariables.push(`:${bindsCount}`);
+          inStatementVariables.push('?');
         }
         else { // v is {entity:"xxx",attribute:"xxxxx"}
-          inStatementVariables.push(`"${v.entity}"."${v.attribute}"`);
+          inStatementVariables.push(`"__${v.entity}"."${v.attribute}"`);
         }
       }
       let statement = `${inStatementVariables[0]} IN (${ inStatementVariables.slice(1).join(',') })`;
@@ -1060,7 +1073,7 @@ SqlBuilder.FILTER_OPERATOR = {
       }
       return false;
     },
-    generateStatement: (fn,bindsCount)=> {
+    generateStatement: (fn)=> {
       let binds = [];
       let inStatementVariables = [];
       for (let v of fn.variables) {
@@ -1069,10 +1082,10 @@ SqlBuilder.FILTER_OPERATOR = {
             || typeof v === "number"
             ){
           binds.push(v);
-          inStatementVariables.push(`:${bindsCount}`);
+          inStatementVariables.push('?');
         }
         else { // v is {entity:"xxx",attribute:"xxxxx"}
-          inStatementVariables.push(`"${v.entity}"."${v.attribute}"`);
+          inStatementVariables.push(`"__${v.entity}"."${v.attribute}"`);
         }
       }
       let statement = `${inStatementVariables[0]} NOT IN (${ inStatementVariables.slice(1).join(',') })`;
@@ -1080,7 +1093,5 @@ SqlBuilder.FILTER_OPERATOR = {
     }
   },
 }
-
-
 
 module.exports = SqlBuilder;
